@@ -4,6 +4,7 @@ from utils import TrainConfig
 import sys
 from datasets import load_dataset, Audio
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
+import torch
 
 
 
@@ -23,18 +24,13 @@ def fooberino(cfg: TrainConfig) -> None:
 
     processor = WhisperProcessor.from_pretrained("openai/whisper-small")
     model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+    encoder = model.model.encoder
 
     sample = next(iter(ds))["audio"]
-    input_features = processor(sample["array"], sampling_rate=sample["sampling_rate"], return_tensors="pt").input_features 
-
-    # generate token ids
-    predicted_ids = model.generate(input_features, language="en", task="transcribe")
-
-    # decode token ids to text
-    transcription = processor.batch_decode(predicted_ids, skip_special_tokens=False)
-    print(transcription)
-
-
+    feats = processor.feature_extractor(sample["array"], sampling_rate=16000, return_tensors="pt").input_features
+    speech_embedding = encoder(feats)
+    speech_embedding.last_hidden_state.shape
+    logger.info(torch.Size([1, 1500, 768])) # torch.Size([1, 1500, 768])
 
     breakpoint()
     pass
