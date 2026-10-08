@@ -2,6 +2,8 @@ from omegaconf import OmegaConf
 import logging
 from utils import TrainConfig
 import sys
+from datasets import load_dataset
+
 
 
 logging.basicConfig(
@@ -13,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 def fooberino(cfg: TrainConfig) -> None:
     """A fooberino function"""
+    ds = load_dataset(cfg.dataset_name, split=cfg.subset_name) 
+
+
     breakpoint()
     pass
 

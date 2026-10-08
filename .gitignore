@@ -1,3 +1,7 @@
+# ingore unsaved emac files
+.#*
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

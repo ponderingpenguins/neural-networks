@@ -6,8 +6,11 @@ from typing import Optional
 @dataclass
 class TrainConfig:
     """Configuration for the project."""
-    subset_names: Optional[str] = None
+
+    subset_name: Optional[str] = None
     dataset_name: str = MISSING
+    max_samples: int = MISSING
+
     output_path: Path = MISSING
     seed:int = 67
     overwrite: bool = False
