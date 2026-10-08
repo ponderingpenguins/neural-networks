@@ -20,6 +20,7 @@ device = (
     else torch.device("cuda") if torch.cuda.is_available()
     else torch.device("cpu")
 )
+k = 5
 
 def fooberino(cfg: TrainConfig) -> None:
     """A fooberino function"""
@@ -31,56 +32,74 @@ def fooberino(cfg: TrainConfig) -> None:
     # Speech embedding model
     processor = WhisperProcessor.from_pretrained("openai/whisper-small")
     model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
-    encoder = model.model.encoder
-
-    sample = next(iter(ds))["audio"]
-    feats = processor.feature_extractor(sample["array"], sampling_rate=16000, return_tensors="pt").input_features
-    speech_embedding = encoder(feats)
-    speech_embedding.last_hidden_state.shape
-    logger.info(torch.Size([1, 1500, 768])) # torch.Size([1, 1500, 768])
+    encoder = model.model.encoder.to(device).eval()
 
     # LM
     lm_name = "Qwen/Qwen3-0.6B"
-
-    # load the tokenizer and the model
     tokenizer = AutoTokenizer.from_pretrained(lm_name)
     lm = AutoModelForCausalLM.from_pretrained(
         lm_name,
         torch_dtype="auto",
     ).to(device)
+    # Projector
+    enc_dim = encoder.config.d_model
+    lm_dim = lm.config.hidden_size
+    proj_hidden_dim = 2048
+    projector = torch.nn.Sequential(
+        torch.nn.Linear(enc_dim * k, proj_hidden_dim),
+        torch.nn.ReLU(),
+        torch.nn.Linear(proj_hidden_dim, lm_dim),
+    ).to(device)
 
-    # prepare the model input
-    prompt = "Give me a short introduction to large language model."
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False # Switches between thinking and non-thinking modes. Default is True.
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(lm.device)
+    # Calculate speech embeding
+    sample = next(iter(ds))["audio"]
+    feats = processor.feature_extractor(
+        sample["array"], sampling_rate=16000, return_tensors="pt"
+    ).input_features.to(device)
+    with torch.no_grad():
+        h = encoder(feats).last_hidden_state # [1, 1500, 768]
+    logger.info(f"encoder out: {tuple(h.shape)}")
 
-    # conduct text completion
-    generated_ids = lm.generate(
-        **model_inputs,
-        max_new_tokens=32768
-    )
-    output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist() 
 
-    # parsing thinking content
-    try:
-        # rindex finding 151668 (</think>)
-        index = len(output_ids) - output_ids[::-1].index(151668)
-    except ValueError:
-        index = 0
+    # Downsample just like in section 2.3, eq. 2 and 3
+    B, T, D = h.shape
+    N = T // k
+    z = h[:, : N * k].reshape(B, N, k * D) # [1, 300, 3840]
+    logger.info(f"downsampled: {tuple(z.shape)}")
 
-    thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
-    content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+    # # prepare the model input
+    # prompt = "Give me a short introduction to large language model."
+    # messages = [
+    #     {"role": "user", "content": prompt}
+    # ]
+    # text = tokenizer.apply_chat_template(
+    #     messages,
+    #     tokenize=False,
+    #     add_generation_prompt=True,
+    #     enable_thinking=False # Switches between thinking and non-thinking modes. Default is True.
+    # )
+    # model_inputs = tokenizer([text], return_tensors="pt").to(lm.device)
+    # print(model_inputs["input_ids"].shape)
 
-    print("thinking content:", thinking_content)
-    print("content:", content)
+    # # conduct text completion
+    # generated_ids = lm.generate(
+    #     **model_inputs,
+    #     max_new_tokens=32768
+    # )
+    # output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
+
+    # # parsing thinking content
+    # try:
+    #     # rindex finding 151668 (</think>)
+    #     index = len(output_ids) - output_ids[::-1].index(151668)
+    # except ValueError:
+    #     index = 0
+
+    # thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+    # content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+
+    # print("thinking content:", thinking_content)
+    # print("content:", content)
 
 
     breakpoint()
