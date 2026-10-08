@@ -21,6 +21,7 @@ device = (
     else torch.device("cpu")
 )
 k = 5
+k = 50 # experiment
 
 def fooberino(cfg: TrainConfig) -> None:
     """A fooberino function"""
@@ -52,7 +53,11 @@ def fooberino(cfg: TrainConfig) -> None:
     ).to(device)
 
     # Calculate speech embeding
-    sample = next(iter(ds))["audio"]
+    example = next(iter(ds))
+
+    sample = example["audio"]
+    breakpoint()
+    transcript = example["text"]
     feats = processor.feature_extractor(
         sample["array"], sampling_rate=16000, return_tensors="pt"
     ).input_features.to(device)
@@ -66,6 +71,50 @@ def fooberino(cfg: TrainConfig) -> None:
     N = T // k
     z = h[:, : N * k].reshape(B, N, k * D) # [1, 300, 3840]
     logger.info(f"downsampled: {tuple(z.shape)}")
+
+    # Run downsampled speech embeddings through the projector
+    e_s = projector(z)  # [1, 300, 1024]
+    e_s = e_s.to(lm.dtype)
+    logger.info(f"projected: {tuple(e_s.shape)}")
+
+    # Build the template, like in eq. 7. Template(E_s, E_p)
+    embed = lm.get_input_embeddings()
+
+    def embed_text(s: str) -> torch.Tensor:
+        ids = tokenizer(s, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+        return embed(ids)
+
+    inputs_embeds = torch.cat(
+        [
+            embed_text("USER:"),
+            e_s,
+            embed_text(" Transcribe speech to text. ASSISTANT:"),
+        ],
+        dim=1,
+    )
+    attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device)
+
+    # Generate "transcript" with the LM and the projected speech embeddings
+    with torch.no_grad():
+        out_ids = lm.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=64,
+        )
+    print("output:", tokenizer.batch_decode(out_ids, skip_special_tokens=True)[0])
+    print("ground truth transcript: ", transcript)
+
+
+
+
+
+
+
+
+
+
+
+
 
     # # prepare the model input
     # prompt = "Give me a short introduction to large language model."
