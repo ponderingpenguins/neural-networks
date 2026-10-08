@@ -21,7 +21,6 @@ device = (
     else torch.device("cpu")
 )
 k = 5
-k = 50 # experiment
 
 def fooberino(cfg: TrainConfig) -> None:
     """A fooberino function"""
