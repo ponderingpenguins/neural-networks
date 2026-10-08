@@ -56,7 +56,6 @@ def fooberino(cfg: TrainConfig) -> None:
     example = next(iter(ds))
 
     sample = example["audio"]
-    breakpoint()
     transcript = example["text"]
     feats = processor.feature_extractor(
         sample["array"], sampling_rate=16000, return_tensors="pt"
