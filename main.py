@@ -24,6 +24,7 @@ k = 5
 
 def fooberino(cfg: TrainConfig) -> None:
     """A fooberino function"""
+    torch.manual_seed(cfg.seed)
     ds = load_dataset(cfg.dataset_name, split=cfg.subset_name, streaming=True)
     ds = ds.cast_column("audio", Audio(sampling_rate=16000))
     if cfg.max_samples:
@@ -39,7 +40,7 @@ def fooberino(cfg: TrainConfig) -> None:
     tokenizer = AutoTokenizer.from_pretrained(lm_name)
     lm = AutoModelForCausalLM.from_pretrained(
         lm_name,
-        torch_dtype="auto",
+        dtype=torch.float32,
     ).to(device)
     # Projector
     enc_dim = encoder.config.d_model
@@ -70,40 +71,39 @@ def fooberino(cfg: TrainConfig) -> None:
     z = h[:, : N * k].reshape(B, N, k * D) # [1, 300, 3840]
     logger.info(f"downsampled: {tuple(z.shape)}")
 
-    # Run downsampled speech embeddings through the projector
-    e_s = projector(z)  # [1, 300, 1024]
-    e_s = e_s.to(lm.dtype)
-    logger.info(f"projected: {tuple(e_s.shape)}")
-
-    # Build the template, like in eq. 7. Template(E_s, E_p)
+    # Freeze the LM, only train the projector
+    lm.requires_grad_(False)
     embed = lm.get_input_embeddings()
 
     def embed_text(s: str) -> torch.Tensor:
         ids = tokenizer(s, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
         return embed(ids)
 
-    inputs_embeds = torch.cat(
-        [
-            embed_text("USER:"),
-            e_s,
-            embed_text(" Transcribe speech to text. ASSISTANT:"),
-        ],
-        dim=1,
-    )
-    attention_mask = torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device)
+    # Template(E_s, E_p), eq. 7, plus the transcript as the target
+    prefix = embed_text("USER:")
+    suffix = embed_text(" Transcribe speech to text. ASSISTANT:")
+    target = tokenizer(transcript + tokenizer.eos_token, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+
+    opt = torch.optim.AdamW(projector.parameters(), lr=cfg.lr)
+    for step in range(cfg.steps):
+        # Run the pre-computed speech embedding (z) through the projector
+        e_s = projector(z).to(lm.dtype)  # [1, 300, 1024]
+        inputs_embeds = torch.cat([prefix, e_s, suffix, embed(target)], dim=1)
+        # loss only on the transcript tokens
+        labels = torch.full(inputs_embeds.shape[:2], -100, device=device)
+        labels[:, -target.shape[1]:] = target
+        loss = lm(inputs_embeds=inputs_embeds, labels=labels).loss
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        logger.info(f"step {step} loss {loss.item():.4f}")
 
     # Generate "transcript" with the LM and the projected speech embeddings
     with torch.no_grad():
-        out_ids = lm.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_new_tokens=64,
-        )
-    print("output:", tokenizer.batch_decode(out_ids, skip_special_tokens=True)[0])
+        inputs_embeds = torch.cat([prefix, projector(z).to(lm.dtype), suffix], dim=1)
+        out_ids = lm.generate(inputs_embeds=inputs_embeds, max_new_tokens=64, do_sample=False)
+    print("output:                  ", tokenizer.batch_decode(out_ids, skip_special_tokens=True)[0])
     print("ground truth transcript: ", transcript)
-
-    breakpoint()
-    pass
 
 def main() -> None:
     """main function"""

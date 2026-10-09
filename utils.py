@@ -14,3 +14,6 @@ class TrainConfig:
     output_path: Path = MISSING
     seed:int = 67
     overwrite: bool = False
+
+    steps: int = 300
+    lr: float = 1e-3
