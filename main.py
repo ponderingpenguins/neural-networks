@@ -1,12 +1,17 @@
-from omegaconf import OmegaConf
 import logging
-from utils import TrainConfig
 import sys
-from datasets import load_dataset, Audio
-from transformers import WhisperProcessor, WhisperForConditionalGeneration, AutoModelForCausalLM, AutoTokenizer
+
 import torch
+from datasets import Audio, load_dataset
+from omegaconf import OmegaConf
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+)
 
-
+from utils import TrainConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +40,7 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
     encoder = whisper_model.model.encoder.to(device).eval()
 
-    # LM
+    # Language Model
     lm_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(lm_name)
     lm = AutoModelForCausalLM.from_pretrained(

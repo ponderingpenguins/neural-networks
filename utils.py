@@ -1,15 +1,17 @@
 from dataclasses import dataclass
 from pathlib import Path
+
 from omegaconf import MISSING
-from typing import Optional
+
 
 @dataclass
 class TrainConfig:
     """Configuration for the project."""
 
-    dataset_split: Optional[str] = None
+    dataset_split: str | None = None
     dataset_name: str = MISSING
     max_samples: int = MISSING
+    batch_size: int = 4
 
     output_path: Path = MISSING
     seed:int = 67
