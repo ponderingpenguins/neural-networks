@@ -29,7 +29,7 @@ device = (
 frame_group_size = 5
 
 def train_projector_and_transcribe(cfg: TrainConfig) -> None:
-    """Train the speech projector on one example and generate its transcript."""
+    """Train the speech projector on a fixed batch and transcribe its first example."""
     torch.manual_seed(cfg.seed)
     if cfg.batch_size < 1:
         raise ValueError("batch_size must be at least 1.")
@@ -95,10 +95,6 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     ].reshape(batch_size, grouped_frame_count, frame_group_size * encoder_dim) # [batch_size, 300, 3840]; each embedding: [3840]
     logger.info(f"downsampled batch: {tuple(batched_grouped_speech_embeddings.shape)}")
 
-    # Training still uses the first pair until transcript batching is implemented.
-    grouped_speech_embeddings = batched_grouped_speech_embeddings[:1]
-    transcript = fixed_batch[0]["text"]
-
     # Freeze the LM, only train the projector
     lm.requires_grad_(False)
     token_embedding_layer = lm.get_input_embeddings()
@@ -107,19 +103,51 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         token_ids = tokenizer(text, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
         return token_embedding_layer(token_ids)
 
-    # Template(E_s, E_p), eq. 7, plus the transcript as the target
-    prompt_prefix_embeddings = embed_text("USER:")
-    prompt_suffix_embeddings = embed_text(" Transcribe speech to text. ASSISTANT:")
-    transcript_token_ids = tokenizer(transcript + tokenizer.eos_token, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+    # Template(E_s, E_p), eq. 7, plus each transcript as its target.
+    prompt_prefix_embeddings = embed_text("USER:").expand(batch_size, -1, -1)
+    prompt_suffix_embeddings = embed_text(" Transcribe speech to text. ASSISTANT:").expand(
+        batch_size, -1, -1
+    )
+    if tokenizer.eos_token_id is None:
+        raise ValueError("The tokenizer must define an EOS token for transcript targets.")
+    transcript_token_ids = [
+        torch.tensor(
+            tokenizer(example["text"], add_special_tokens=False).input_ids
+            + [tokenizer.eos_token_id],
+            dtype=torch.long,
+            device=device,
+        )
+        for example in fixed_batch
+    ]
+    transcript_embeddings = [token_embedding_layer(ids) for ids in transcript_token_ids]
+    transcript_start = (
+        prompt_prefix_embeddings.shape[1]
+        + grouped_frame_count
+        + prompt_suffix_embeddings.shape[1]
+    )
 
     opt = torch.optim.AdamW(projector.parameters(), lr=cfg.lr)
     for step in range(cfg.steps):
-        # Run the pre-computed speech embedding (grouped_speech_embeddings) through the projector
-        projected_speech_embeddings = projector(grouped_speech_embeddings).to(lm.dtype)  # [1, 300, 1024]
-        inputs_embeds = torch.cat([prompt_prefix_embeddings, projected_speech_embeddings, prompt_suffix_embeddings, token_embedding_layer(transcript_token_ids)], dim=1)
-        # loss only on the transcript tokens
-        labels = torch.full(inputs_embeds.shape[:2], -100, device=device)
-        labels[:, -transcript_token_ids.shape[1]:] = transcript_token_ids
+        projected_speech_embeddings = projector(batched_grouped_speech_embeddings).to(lm.dtype) # [batch_size, 300, lm_dim]
+        training_sequences = [
+            torch.cat(
+                [
+                    prompt_prefix_embeddings[index],
+                    projected_speech_embeddings[index],
+                    prompt_suffix_embeddings[index],
+                    transcript_embeddings[index],
+                ],
+                dim=0,
+            )
+            for index in range(batch_size)
+        ]
+        # Right-pad complete sequences with zero embeddings to the longest sequence.
+        inputs_embeds = torch.nn.utils.rnn.pad_sequence(
+            training_sequences, batch_first=True, padding_value=0.0
+        ) # [batch_size, max_sequence_length, lm_dim]
+        labels = torch.full(inputs_embeds.shape[:2], -100, dtype=torch.long, device=device)
+        for index, token_ids in enumerate(transcript_token_ids):
+            labels[index, transcript_start : transcript_start + len(token_ids)] = token_ids
         loss = lm(inputs_embeds=inputs_embeds, labels=labels).loss
         opt.zero_grad()
         loss.backward()
@@ -128,10 +156,14 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
 
     # Generate "transcript" with the LM and the projected speech embeddings
     with torch.no_grad():
-        inputs_embeds = torch.cat([prompt_prefix_embeddings, projector(grouped_speech_embeddings).to(lm.dtype), prompt_suffix_embeddings], dim=1)
+        inputs_embeds = torch.cat(
+            [prompt_prefix_embeddings[:1],
+             projector(batched_grouped_speech_embeddings[:1]).to(lm.dtype),
+             prompt_suffix_embeddings[:1]], dim=1
+        )
         generated_token_ids = lm.generate(inputs_embeds=inputs_embeds, max_new_tokens=64, do_sample=False)
     print("output:                  ", tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)[0])
-    print("ground truth transcript: ", transcript)
+    print("ground truth transcript: ", fixed_batch[0]["text"])
 
 def main() -> None:
     """main function"""
