@@ -1,5 +1,6 @@
 import logging
 import sys
+from itertools import islice
 
 import torch
 from datasets import Audio, load_dataset
@@ -30,10 +31,25 @@ frame_group_size = 5
 def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     """Train the speech projector on one example and generate its transcript."""
     torch.manual_seed(cfg.seed)
+    if cfg.batch_size < 1:
+        raise ValueError("batch_size must be at least 1.")
+    if cfg.max_samples and cfg.max_samples < cfg.batch_size:
+        raise ValueError("max_samples must be at least batch_size.")
     speech_dataset = load_dataset(cfg.dataset_name, split=cfg.dataset_split, streaming=True)
     speech_dataset = speech_dataset.cast_column("audio", Audio(sampling_rate=16000))
     if cfg.max_samples:
         speech_dataset = speech_dataset.take(cfg.max_samples)
+
+    # Select once so every training step can reuse the same audio/transcript pairs.
+    fixed_batch = list(islice(speech_dataset, cfg.batch_size))
+    if len(fixed_batch) < cfg.batch_size:
+        raise ValueError(
+            f"Requested {cfg.batch_size} examples, but only found {len(fixed_batch)}."
+        )
+    example_ids = [example["id"] for example in fixed_batch]
+    if len(set(example_ids)) != cfg.batch_size:
+        raise ValueError("The fixed batch must contain distinct dataset example IDs.")
+    logger.info("Selected fixed batch of %d examples: %s", len(fixed_batch), example_ids)
 
     # Speech embedding model
     processor = WhisperProcessor.from_pretrained("openai/whisper-small")
@@ -58,7 +74,8 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     ).to(device)
 
     # Calculate speech embeding
-    example = next(iter(speech_dataset))
+    # Use the first selected pair until audio and transcript batching is implemented.
+    example = fixed_batch[0]
 
     audio_sample = example["audio"]
     transcript = example["text"]
