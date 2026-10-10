@@ -7,7 +7,7 @@ from typing import Optional
 class TrainConfig:
     """Configuration for the project."""
 
-    subset_name: Optional[str] = None
+    dataset_split: Optional[str] = None
     dataset_name: str = MISSING
     max_samples: int = MISSING
 
