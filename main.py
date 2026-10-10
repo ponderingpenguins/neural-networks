@@ -73,27 +73,31 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         torch.nn.Linear(proj_hidden_dim, lm_dim),
     ).to(device)
 
-    # Calculate speech embeding
-    # Use the first selected pair until audio and transcript batching is implemented.
-    example = fixed_batch[0]
-
-    audio_sample = example["audio"]
-    transcript = example["text"]
+    # Prepare all selected recordings together, padded to Whisper's 30-second window.
+    audio_arrays = [example["audio"]["array"] for example in fixed_batch]
     audio_features = processor.feature_extractor(
-        audio_sample["array"], sampling_rate=16000, return_tensors="pt"
+        audio_arrays,
+        sampling_rate=16000,
+        padding="max_length",
+        max_length=processor.feature_extractor.n_samples,
+        truncation=True,
+        return_tensors="pt",
     ).input_features.to(device)
     with torch.no_grad():
-        speech_embeddings = encoder(audio_features).last_hidden_state # [1, 1500, 768]
+        speech_embeddings = encoder(audio_features).last_hidden_state # [batch, 1500, 768]
     logger.info(f"encoder out: {tuple(speech_embeddings.shape)}")
 
-
-    # Downsample just like in section 2.3, eq. 2 and 3
+    # Cache grouped embeddings once; keep encoded silence positions for the LM.
     batch_size, frame_count, encoder_dim = speech_embeddings.shape
     grouped_frame_count = frame_count // frame_group_size
-    grouped_speech_embeddings = speech_embeddings[
+    batched_grouped_speech_embeddings = speech_embeddings[
         :, : grouped_frame_count * frame_group_size
-    ].reshape(batch_size, grouped_frame_count, frame_group_size * encoder_dim) # [1, 300, 3840]
-    logger.info(f"downsampled: {tuple(grouped_speech_embeddings.shape)}")
+    ].reshape(batch_size, grouped_frame_count, frame_group_size * encoder_dim) # [batch_size, 300, 3840]; each embedding: [3840]
+    logger.info(f"downsampled batch: {tuple(batched_grouped_speech_embeddings.shape)}")
+
+    # Training still uses the first pair until transcript batching is implemented.
+    grouped_speech_embeddings = batched_grouped_speech_embeddings[:1]
+    transcript = fixed_batch[0]["text"]
 
     # Freeze the LM, only train the projector
     lm.requires_grad_(False)
