@@ -145,10 +145,20 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         inputs_embeds = torch.nn.utils.rnn.pad_sequence(
             training_sequences, batch_first=True, padding_value=0.0
         ) # [batch_size, max_sequence_length, lm_dim]
+        # Attend to real sequence positions, including Whisper's encoded silence.
+        attention_mask = torch.zeros(
+            inputs_embeds.shape[:2], dtype=torch.long, device=device
+        )
+        for index, sequence in enumerate(training_sequences):
+            attention_mask[index, :sequence.shape[0]] = 1
         labels = torch.full(inputs_embeds.shape[:2], -100, dtype=torch.long, device=device)
         for index, token_ids in enumerate(transcript_token_ids):
             labels[index, transcript_start : transcript_start + len(token_ids)] = token_ids
-        loss = lm(inputs_embeds=inputs_embeds, labels=labels).loss
+        loss = lm(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+        ).loss
         opt.zero_grad()
         loss.backward()
         opt.step()
