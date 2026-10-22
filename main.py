@@ -1,13 +1,15 @@
+import json
 import logging
 import os
 import sys
+from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from bake import bake_speech_embeddings, load_baked_embeddings
-from utils import TrainConfig
+from utils import TrainConfig, plot_wer, word_error_rate
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +37,15 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     if example_count < cfg.batch_size:
         raise ValueError(f"batch_size {cfg.batch_size} exceeds the {example_count} baked examples.")
     logger.info(f"loaded baked embeddings: {tuple(baked_embeddings.shape)}")
+    eval_sets = {}
+    train_eval_count = min(cfg.train_eval_samples, example_count)
+    if train_eval_count > 0:
+        eval_sets["train"] = (baked_embeddings[:train_eval_count], transcripts[:train_eval_count])
+    for subset, sample_count in (("val", cfg.val_samples), ("test", cfg.test_samples)):
+        if sample_count > 0:
+            eval_embeddings, _, eval_texts = load_baked_embeddings(cfg, subset)
+            eval_sets[subset] = (eval_embeddings, eval_texts)
+            logger.info(f"loaded {subset} embeddings: {tuple(eval_embeddings.shape)}")
 
     # Language Model
     lm_name = "Qwen/Qwen3-0.6B"
@@ -80,6 +91,34 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         + prompt_suffix_embeddings.shape[1]
     )
 
+    def evaluate_wer(subset: str) -> float:
+        """Greedy-decode every example of a subset and return its corpus-level WER."""
+        eval_embeddings, eval_texts = eval_sets[subset]
+        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        projector.eval()
+        hypotheses: list[str] = []
+        # Every example has the same length (30 s padded audio), so batches need no padding.
+        for start in range(0, len(eval_texts), cfg.eval_batch_size):
+            batch = eval_embeddings[start : start + cfg.eval_batch_size]
+            with torch.no_grad():
+                speech = projector(batch.to(device=device, dtype=torch.float32)).to(lm.dtype)
+                inputs_embeds = torch.cat(
+                    [prompt_prefix_embeddings.expand(len(batch), -1, -1),
+                     speech,
+                     prompt_suffix_embeddings.expand(len(batch), -1, -1)], dim=1
+                )
+                generated_token_ids = lm.generate(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device),
+                    max_new_tokens=cfg.eval_max_new_tokens,
+                    do_sample=False,
+                    eos_token_id=tokenizer.eos_token_id,
+                    pad_token_id=pad_token_id,
+                )
+            hypotheses += tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)
+        projector.train()
+        return word_error_rate(eval_texts, hypotheses)
+
     generator = torch.Generator().manual_seed(cfg.seed)
     permutation: list[int] = []
 
@@ -91,6 +130,7 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         indices, permutation = permutation[: cfg.batch_size], permutation[cfg.batch_size :]
         return indices
 
+    history: list[dict] = []
     opt = torch.optim.AdamW(projector.parameters(), lr=cfg.lr)
     for step in range(cfg.steps):
         indices = next_batch_indices()
@@ -131,6 +171,20 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         loss.backward()
         opt.step()
         logger.info(f"step {step} loss {loss.item():.4f}")
+        if (cfg.eval_every and (step + 1) % cfg.eval_every == 0) or step + 1 == cfg.steps:
+            row: dict = {"step": step + 1, "loss": loss.item()}
+            for subset in ("train", "val"):
+                if subset in eval_sets:
+                    row[f"{subset}_wer"] = evaluate_wer(subset)
+            history.append(row)
+            logger.info(f"step {step} " + " ".join(f"{k} {v:.4f}" for k, v in row.items() if k.endswith("_wer")))
+
+    if "test" in eval_sets:
+        logger.info(f"final test WER {evaluate_wer('test'):.4f} ({len(eval_sets['test'][1])} examples)")
+    output_dir = Path(cfg.output_path)
+    (output_dir / "wer_history.json").write_text(json.dumps(history, indent=2))
+    plot_wer(history, output_dir / "wer.png")
+    logger.info(f"saved WER history and plot to {output_dir}")
 
     # Generate "transcripts" with the LM and the projected speech embeddings
     projector.eval()

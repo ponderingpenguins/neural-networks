@@ -13,34 +13,58 @@ logger = logging.getLogger(__name__)
 frame_group_size = 5
 
 
-def embeddings_dir(cfg: TrainConfig) -> Path:
-    """Directory holding the baked speech embedding shards."""
-    return Path(cfg.output_path) / "speech_embeddings"
+SUBSETS = ("train", "val", "test")
+
+
+def subset_spec(cfg: TrainConfig, subset: str) -> tuple[str | None, int, Path]:
+    """Dataset split, number of samples and shard directory for a subset (train/val/test)."""
+    if subset == "train":
+        return cfg.dataset_split, cfg.max_samples, Path(cfg.output_path) / "speech_embeddings"
+    if subset == "val":
+        return cfg.val_split, cfg.val_samples, Path(cfg.output_path) / "speech_embeddings_val"
+    if subset == "test":
+        return cfg.test_split, cfg.test_samples, Path(cfg.output_path) / "speech_embeddings_test"
+    raise ValueError(f"Unknown subset '{subset}'; expected one of {SUBSETS}.")
 
 
 def bake_speech_embeddings(cfg: TrainConfig, device: torch.device) -> None:
+    """Bake the train, val and test subsets that have a non-zero sample count."""
+    if cfg.bake_batch_size < 1:
+        raise ValueError("bake_batch_size must be at least 1.")
+    processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+    whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+    encoder = whisper_model.model.encoder.to(device).eval()
+    for subset in SUBSETS:
+        split, sample_count, out_dir = subset_spec(cfg, subset)
+        if sample_count > 0:
+            logger.info(f"baking {subset}: {sample_count} examples from {split}")
+            _bake_subset(cfg, processor, encoder, device, split, sample_count, out_dir)
+
+
+def _bake_subset(
+    cfg: TrainConfig,
+    processor: WhisperProcessor,
+    encoder: torch.nn.Module,
+    device: torch.device,
+    split: str | None,
+    max_samples: int,
+    out_dir: Path,
+) -> None:
     """Encode max_samples recordings with Whisper and save grouped embeddings to disk.
 
     Each shard holds one encoder batch: fp16 embeddings [n, 300, 3840], ids and transcripts.
     Existing shards are skipped unless cfg.overwrite is set, so an interrupted bake can resume.
     """
-    if cfg.bake_batch_size < 1:
-        raise ValueError("bake_batch_size must be at least 1.")
-    out_dir = embeddings_dir(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    speech_dataset = load_dataset(cfg.dataset_name, split=cfg.dataset_split, streaming=True)
+    speech_dataset = load_dataset(cfg.dataset_name, split=split, streaming=True)
     speech_dataset = speech_dataset.cast_column("audio", Audio(sampling_rate=16000))
-    speech_dataset = speech_dataset.take(cfg.max_samples)
-
-    processor = WhisperProcessor.from_pretrained("openai/whisper-small")
-    whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
-    encoder = whisper_model.model.encoder.to(device).eval()
+    speech_dataset = speech_dataset.take(max_samples)
 
     iterator = iter(speech_dataset)
     baked = 0
     shard_index = 0
-    while baked < cfg.max_samples:
+    while baked < max_samples:
         examples = list(islice(iterator, cfg.bake_batch_size))
         if not examples:
             break
@@ -77,31 +101,24 @@ def bake_speech_embeddings(cfg: TrainConfig, device: torch.device) -> None:
             },
             shard_path,
         )
-        logger.info("baked %d/%d -> %s", baked, cfg.max_samples, shard_path.name)
+        logger.info("baked %d/%d -> %s", baked, max_samples, shard_path.name)
 
-    if baked < cfg.max_samples:
-        logger.warning("Requested %d examples, but the dataset only had %d.", cfg.max_samples, baked)
+    if baked < max_samples:
+        logger.warning("Requested %d examples, but the dataset only had %d.", max_samples, baked)
 
 
-def load_baked_embeddings(cfg: TrainConfig) -> tuple[torch.Tensor, list[str], list[str]]:
-    """Load every shard into memory: fp16 embeddings [N, 300, 3840], ids, transcripts."""
-    shard_paths = sorted(embeddings_dir(cfg).glob("shard_*.pt"))
+def load_baked_embeddings(
+    cfg: TrainConfig, subset: str = "train"
+) -> tuple[torch.Tensor, list[str], list[str]]:
+    """Load a subset's shards into memory: fp16 embeddings [N, 300, 3840], ids, transcripts."""
+    _, _, shard_dir = subset_spec(cfg, subset)
+    shard_paths = sorted(shard_dir.glob("shard_*.pt"))
     if not shard_paths:
-        raise FileNotFoundError(
-            f"No baked embeddings in {embeddings_dir(cfg)}; run with stage=bake first."
-        )
-    # Stale shards from an earlier, larger bake may sit on disk; only use the first max_samples.
-    shards = []
-    loaded = 0
-    for path in shard_paths:
-        if loaded >= cfg.max_samples:
-            break
-        shard = torch.load(path)
-        shards.append(shard)
-        loaded += len(shard["ids"])
-    embeddings = torch.cat([shard["embeddings"] for shard in shards])[: cfg.max_samples]
-    ids = [i for shard in shards for i in shard["ids"]][: cfg.max_samples]
-    texts = [t for shard in shards for t in shard["texts"]][: cfg.max_samples]
+        raise FileNotFoundError(f"No baked embeddings in {shard_dir}; run with stage=bake first.")
+    shards = [torch.load(path) for path in shard_paths]
+    embeddings = torch.cat([shard["embeddings"] for shard in shards])
+    ids = [i for shard in shards for i in shard["ids"]]
+    texts = [t for shard in shards for t in shard["texts"]]
     if len(set(ids)) != len(ids):
         raise ValueError("Baked shards contain duplicate example IDs.")
     return embeddings, ids, texts
