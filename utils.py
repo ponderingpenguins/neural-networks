@@ -12,6 +12,8 @@ class TrainConfig:
     dataset_name: str = MISSING
     max_samples: int = MISSING
     batch_size: int = 4
+    stage: str = "train"  # "bake" caches Whisper embeddings to disk, "train" trains on them
+    bake_batch_size: int = 8
 
     output_path: Path = MISSING
     seed:int = 67
