@@ -36,7 +36,8 @@ class TrainConfig:
     overwrite: bool = False
 
     steps: int = 300
-    lr: float = 1e-3
+    lr: float = 1e-3  # peak learning rate
+    warmup_steps: int = 1000  # linear warmup from 0 to lr; the rate then stays constant (as in the paper)
     save_every: int = 100  # save a projector checkpoint every N training steps; 0 = only the final one
 
 

@@ -7,4 +7,4 @@ uv sync
 uv run main.py stage=bake dataset_name="openslr/librispeech_asr" dataset_split="train.clean.100" output_path="./results" max_samples=1 val_samples=1 test_samples=1
 
 # Stage 2: train the projector on the cached embeddings
-uv run main.py stage=train dataset_name="openslr/librispeech_asr" dataset_split="train.clean.100" output_path="./results" max_samples=1 batch_size=1 val_samples=1 test_samples=1 eval_every=10 steps=100
+uv run main.py stage=train dataset_name="openslr/librispeech_asr" dataset_split="train.clean.100" output_path="./results" max_samples=1 batch_size=1 val_samples=1 test_samples=1 eval_every=10 steps=100 warmup_steps=10

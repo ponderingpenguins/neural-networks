@@ -108,6 +108,9 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
 
     history: list[dict] = []
     opt = torch.optim.AdamW(projector.parameters(), lr=cfg.lr)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda step: min(1.0, (step + 1) / cfg.warmup_steps) if cfg.warmup_steps > 0 else 1.0
+    )
     for step in range(cfg.steps):
         indices = next_batch_indices()
         batch_embeddings = baked_embeddings[indices].to(device=device, dtype=torch.float32)
@@ -146,6 +149,7 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         opt.zero_grad()
         loss.backward()
         opt.step()
+        scheduler.step()
         logger.info(f"step {step} loss {loss.item():.4f}")
         if cfg.save_every and (step + 1) % cfg.save_every == 0:
             checkpoint_dir = Path(cfg.output_path) / "checkpoints"
