@@ -25,14 +25,16 @@ uv sync
 
 ## Training
 
-To train the model run:
+`scripts/quick_test.sh` is a one-example check. To bake, train (3 seeds) and analyse the full run on a Habrok A100:
 
 ```
-./scripts/train.sh
+sbatch scripts/train.sh
 ```
+
+Settings can be overridden from the environment, e.g. `sbatch --export=ALL,SEEDS=1,STEPS=200 scripts/train.sh`.
 
 If it does not work, you might need to give it excecutable permsissions first:
 
 ```
-chmod +x ./scripts/train.sh
+chmod +x ./scripts/*.sh
 ```
