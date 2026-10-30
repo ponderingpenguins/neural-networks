@@ -31,6 +31,12 @@ uv sync
 sbatch scripts/train.sh
 ```
 
+For a short end-to-end check on the cluster first (10% of the data, one seed, about 45 minutes or less):
+
+```
+sbatch scripts/short_run.sh
+```
+
 Settings can be overridden from the environment, e.g. `sbatch --export=ALL,SEEDS=1,STEPS=200 scripts/train.sh`.
 
 If it does not work, you might need to give it excecutable permsissions first:

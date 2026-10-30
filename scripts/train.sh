@@ -24,6 +24,8 @@ STEPS=${STEPS:-5000}
 BATCH_SIZE=${BATCH_SIZE:-16}
 LR=${LR:-1e-4}                     # the paper's peak learning rate
 WARMUP_STEPS=${WARMUP_STEPS:-1000}
+TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-200}
+WER_EXAMPLES=${WER_EXAMPLES:-200}  # examples used for the replacement-WER test in the analysis
 EVAL_EVERY=${EVAL_EVERY:-500}
 SAVE_EVERY=${SAVE_EVERY:-500}
 OUT=${OUT:-./results}
@@ -44,8 +46,8 @@ for SEED in $SEEDS; do
     uv run main.py stage=train dataset_name="$DATASET" dataset_split="$SPLIT" output_path="$RUN" \
         max_samples="$MAX_SAMPLES" val_samples="$VAL_SAMPLES" test_samples="$TEST_SAMPLES" \
         seed="$SEED" steps="$STEPS" batch_size="$BATCH_SIZE" lr="$LR" warmup_steps="$WARMUP_STEPS" \
-        eval_every="$EVAL_EVERY" save_every="$SAVE_EVERY" train_eval_samples=200 eval_batch_size=32
+        eval_every="$EVAL_EVERY" save_every="$SAVE_EVERY" train_eval_samples="$TRAIN_EVAL_SAMPLES" eval_batch_size=32
 
     # Stage 3: analyse the untrained projector, every checkpoint and the final projector
-    uv run analyze.py output_path="$RUN" subset=val seed="$SEED" batch_size=16 wer_examples=200
+    uv run analyze.py output_path="$RUN" subset=val seed="$SEED" batch_size=16 wer_examples="$WER_EXAMPLES"
 done
