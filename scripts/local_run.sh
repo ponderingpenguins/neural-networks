@@ -23,6 +23,5 @@ export SAVE_EVERY=${SAVE_EVERY:-100}
 export TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-50}
 export WER_EXAMPLES=${WER_EXAMPLES:-20}
 export OUT=${OUT:-./results/local_test}
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
 exec bash scripts/train.sh
