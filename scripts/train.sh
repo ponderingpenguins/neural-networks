@@ -11,6 +11,19 @@
 # Use scripts/quick_test.sh for a one-example check first.
 set -euo pipefail
 
+# Optional: ping an endpoint on a VPS when the job ends (success, failure or timeout kill); the VPS sends the email
+# (see scripts/notify_server.py). Nothing happens unless NOTIFY_URL and NOTIFY_TOKEN are both set.
+notify() {
+    local status=$?
+    if [[ -n "${NOTIFY_URL:-}" && -n "${NOTIFY_TOKEN:-}" ]]; then
+        curl -fsS --max-time 20 -H "X-Token: $NOTIFY_TOKEN" \
+            --data-urlencode "subject=slam job ${SLURM_JOB_ID:-local} exited with status $status" \
+            --data-urlencode "body=Job ${SLURM_JOB_NAME:-train.sh} on $(hostname) finished after ${SECONDS}s with exit status $status. Output: slurm-${SLURM_JOB_ID:-local}.out" \
+            "$NOTIFY_URL" || true
+    fi
+}
+trap notify EXIT
+
 source .venv/bin/activate
 uv sync
 

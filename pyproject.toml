@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=5.1.0",
     "matplotlib>=3.11.2",
     "omegaconf>=2.3.1",
+    "soundfile>=0.14.0",
     "torch>=2.14.1",
     "torchcodec>=0.17.0",
     "transformers>=5.19.0",

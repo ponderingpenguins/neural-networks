@@ -39,6 +39,16 @@ sbatch scripts/short_run.sh
 
 Settings can be overridden from the environment, e.g. `sbatch --export=ALL,SEEDS=1,STEPS=200 scripts/train.sh`.
 
+### Running locally
+
+To run a short experiment on a single consumer GPU (built for an RTX 3060 with 12 GB), no Slurm needed. Create the virtual environment first if it does not exist (`uv venv`), then from the repository root:
+
+```
+bash scripts/local_run.sh
+```
+
+It runs the same bake, train and analyse pipeline as `train.sh` on 500 training samples, one seed and 300 steps, and writes to `results/local_test`. It exits early if no NVIDIA GPU is found. The batch size defaults to 4 because the language model runs in fp32; if you hit CUDA out-of-memory, lower it, e.g. `BATCH_SIZE=2 bash scripts/local_run.sh`. Other settings (`STEPS`, `MAX_SAMPLES`, `OUT`, ...) can be overridden the same way.
+
 If it does not work, you might need to give it excecutable permsissions first:
 
 ```

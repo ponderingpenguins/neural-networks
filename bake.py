@@ -1,7 +1,10 @@
+import io
 import logging
 from itertools import islice
 from pathlib import Path
 
+import numpy as np
+import soundfile
 import torch
 from datasets import Audio, load_dataset
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
@@ -41,6 +44,14 @@ def bake_speech_embeddings(cfg: TrainConfig, device: torch.device) -> None:
             _bake_subset(cfg, processor, encoder, device, split, sample_count, out_dir)
 
 
+def _decode_audio(audio: dict) -> np.ndarray:
+    """Decode raw FLAC/WAV bytes with soundfile, so no FFmpeg/torchcodec is needed (LibriSpeech is already 16 kHz)."""
+    array, sampling_rate = soundfile.read(io.BytesIO(audio["bytes"]), dtype="float32")
+    if sampling_rate != 16000:
+        raise ValueError(f"Expected 16 kHz audio, got {sampling_rate} Hz")
+    return array
+
+
 def _bake_subset(
     cfg: TrainConfig,
     processor: WhisperProcessor,
@@ -59,7 +70,7 @@ def _bake_subset(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     speech_dataset = load_dataset(cfg.dataset_name, split=split, streaming=True)
-    speech_dataset = speech_dataset.cast_column("audio", Audio(sampling_rate=16000))
+    speech_dataset = speech_dataset.cast_column("audio", Audio(decode=False))
     speech_dataset = speech_dataset.take(max_samples)
 
     iterator = iter(speech_dataset)
@@ -69,6 +80,8 @@ def _bake_subset(
         examples = list(islice(iterator, cfg.bake_batch_size))
         if not examples:
             break
+        for example in examples:
+            example["audio"]["array"] = _decode_audio(example["audio"])
         shard_path = out_dir / f"shard_{shard_index:05d}.pt"
         shard_index += 1
         baked += len(examples)
