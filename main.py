@@ -6,10 +6,17 @@ from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from bake import bake_speech_embeddings, load_baked_embeddings
-from utils import TrainConfig, plot_wer, word_error_rate
+from utils import (
+    TrainConfig,
+    build_projector,
+    build_prompt_embeddings,
+    load_lm,
+    plot_wer,
+    transcribe,
+    word_error_rate,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +39,7 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     if cfg.batch_size < 1:
         raise ValueError("batch_size must be at least 1.")
 
-    baked_embeddings, example_ids, transcripts = load_baked_embeddings(cfg)  # fp16 [N, 300, 3840]
+    baked_embeddings, example_ids, transcripts, _ = load_baked_embeddings(cfg)  # fp16 [N, 300, 3840]
     example_count, grouped_frame_count, grouped_dim = baked_embeddings.shape
     if example_count < cfg.batch_size:
         raise ValueError(f"batch_size {cfg.batch_size} exceeds the {example_count} baked examples.")
@@ -43,37 +50,17 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         eval_sets["train"] = (baked_embeddings[:train_eval_count], transcripts[:train_eval_count])
     for subset, sample_count in (("val", cfg.val_samples), ("test", cfg.test_samples)):
         if sample_count > 0:
-            eval_embeddings, _, eval_texts = load_baked_embeddings(cfg, subset)
+            eval_embeddings, _, eval_texts, _ = load_baked_embeddings(cfg, subset)
             eval_sets[subset] = (eval_embeddings, eval_texts)
             logger.info(f"loaded {subset} embeddings: {tuple(eval_embeddings.shape)}")
 
-    # Language Model
-    lm_name = "Qwen/Qwen3-0.6B"
-    tokenizer = AutoTokenizer.from_pretrained(lm_name)
-    lm = AutoModelForCausalLM.from_pretrained(
-        lm_name,
-        dtype=torch.float32,
-    ).to(device)
-    # Projector
-    lm_dim = lm.config.hidden_size
-    proj_hidden_dim = 2048
-    projector = torch.nn.Sequential(
-        torch.nn.Linear(grouped_dim, proj_hidden_dim),
-        torch.nn.ReLU(),
-        torch.nn.Linear(proj_hidden_dim, lm_dim),
-    ).to(device)
-
-    # Freeze the LM, only train the projector
-    lm.requires_grad_(False)
+    # Language Model (frozen) and projector
+    tokenizer, lm = load_lm(device)
+    projector = build_projector(grouped_dim, lm.config.hidden_size, device)
     token_embedding_layer = lm.get_input_embeddings()
 
-    def embed_text(text: str) -> torch.Tensor:
-        token_ids = tokenizer(text, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
-        return token_embedding_layer(token_ids)
-
     # Template(E_s, E_p), eq. 7, plus each transcript as its target.
-    prompt_prefix_embeddings = embed_text("USER:")  # [1, prefix_len, lm_dim]
-    prompt_suffix_embeddings = embed_text(" Transcribe speech to text. ASSISTANT:")
+    prompt_prefix_embeddings, prompt_suffix_embeddings = build_prompt_embeddings(tokenizer, lm, device)
     if tokenizer.eos_token_id is None:
         raise ValueError("The tokenizer must define an EOS token for transcript targets.")
     transcript_token_ids = [
@@ -94,28 +81,17 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     def evaluate_wer(subset: str) -> float:
         """Greedy-decode every example of a subset and return its corpus-level WER."""
         eval_embeddings, eval_texts = eval_sets[subset]
-        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         projector.eval()
         hypotheses: list[str] = []
         # Every example has the same length (30 s padded audio), so batches need no padding.
         for start in range(0, len(eval_texts), cfg.eval_batch_size):
             batch = eval_embeddings[start : start + cfg.eval_batch_size]
             with torch.no_grad():
-                speech = projector(batch.to(device=device, dtype=torch.float32)).to(lm.dtype)
-                inputs_embeds = torch.cat(
-                    [prompt_prefix_embeddings.expand(len(batch), -1, -1),
-                     speech,
-                     prompt_suffix_embeddings.expand(len(batch), -1, -1)], dim=1
-                )
-                generated_token_ids = lm.generate(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device),
-                    max_new_tokens=cfg.eval_max_new_tokens,
-                    do_sample=False,
-                    eos_token_id=tokenizer.eos_token_id,
-                    pad_token_id=pad_token_id,
-                )
-            hypotheses += tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)
+                speech = projector(batch.to(device=device, dtype=torch.float32))
+            hypotheses += transcribe(
+                tokenizer, lm, prompt_prefix_embeddings, prompt_suffix_embeddings, speech,
+                cfg.eval_max_new_tokens,
+            )
         projector.train()
         return word_error_rate(eval_texts, hypotheses)
 
@@ -171,6 +147,10 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
         loss.backward()
         opt.step()
         logger.info(f"step {step} loss {loss.item():.4f}")
+        if cfg.save_every and (step + 1) % cfg.save_every == 0:
+            checkpoint_dir = Path(cfg.output_path) / "checkpoints"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            torch.save(projector.state_dict(), checkpoint_dir / f"projector_step{step + 1}.pt")
         if (cfg.eval_every and (step + 1) % cfg.eval_every == 0) or step + 1 == cfg.steps:
             row: dict = {"step": step + 1, "loss": loss.item()}
             for subset in ("train", "val"):
@@ -184,7 +164,8 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
     output_dir = Path(cfg.output_path)
     (output_dir / "wer_history.json").write_text(json.dumps(history, indent=2))
     plot_wer(history, output_dir / "wer.png")
-    logger.info(f"saved WER history and plot to {output_dir}")
+    torch.save(projector.state_dict(), output_dir / "projector.pt")
+    logger.info(f"saved WER history, plot and projector to {output_dir}")
 
     # Generate "transcripts" with the LM and the projected speech embeddings
     projector.eval()

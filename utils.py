@@ -2,7 +2,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import torch
 from omegaconf import MISSING
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+LM_NAME = "Qwen/Qwen3-0.6B"
+PROJ_HIDDEN_DIM = 2048
 
 
 @dataclass
@@ -32,6 +37,7 @@ class TrainConfig:
 
     steps: int = 300
     lr: float = 1e-3
+    save_every: int = 100  # save a projector checkpoint every N training steps; 0 = only the final one
 
 
 def normalize_text(text: str) -> str:
@@ -81,3 +87,61 @@ def plot_wer(history: list[dict], path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def load_lm(device: torch.device):
+    """Load the frozen language model and its tokenizer."""
+    tokenizer = AutoTokenizer.from_pretrained(LM_NAME)
+    lm = AutoModelForCausalLM.from_pretrained(LM_NAME, dtype=torch.float32).to(device)
+    lm.requires_grad_(False)
+    return tokenizer, lm
+
+
+def build_projector(in_dim: int, lm_dim: int, device: torch.device) -> torch.nn.Module:
+    """The two-layer MLP that maps grouped Whisper frames into the LM embedding space."""
+    return torch.nn.Sequential(
+        torch.nn.Linear(in_dim, PROJ_HIDDEN_DIM),
+        torch.nn.ReLU(),
+        torch.nn.Linear(PROJ_HIDDEN_DIM, lm_dim),
+    ).to(device)
+
+
+def embed_text(tokenizer, lm, text: str, device: torch.device) -> torch.Tensor:
+    """Embed text without special tokens: [1, n_tokens, lm_dim]."""
+    token_ids = tokenizer(text, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+    return lm.get_input_embeddings()(token_ids)
+
+
+def build_prompt_embeddings(tokenizer, lm, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Template(E_s, E_p), eq. 7: embeddings placed before and after the speech embeddings."""
+    return (
+        embed_text(tokenizer, lm, "USER:", device),
+        embed_text(tokenizer, lm, " Transcribe speech to text. ASSISTANT:", device),
+    )
+
+
+@torch.no_grad()
+def transcribe(
+    tokenizer,
+    lm,
+    prefix: torch.Tensor,
+    suffix: torch.Tensor,
+    speech: torch.Tensor,
+    max_new_tokens: int,
+) -> list[str]:
+    """Greedy-decode a batch of speech embeddings [batch, frames, lm_dim] (already in the LM space)."""
+    device = speech.device
+    inputs_embeds = torch.cat(
+        [prefix.expand(len(speech), -1, -1), speech.to(lm.dtype), suffix.expand(len(speech), -1, -1)],
+        dim=1,
+    )
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    generated_token_ids = lm.generate(
+        inputs_embeds=inputs_embeds,
+        attention_mask=torch.ones(inputs_embeds.shape[:2], dtype=torch.long, device=device),
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=pad_token_id,
+    )
+    return tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)

@@ -52,7 +52,8 @@ def _bake_subset(
 ) -> None:
     """Encode max_samples recordings with Whisper and save grouped embeddings to disk.
 
-    Each shard holds one encoder batch: fp16 embeddings [n, 300, 3840], ids and transcripts.
+    Each shard holds one encoder batch: fp16 embeddings [n, 300, 3840], ids, transcripts and the
+    unpadded audio length in 16 kHz samples (to tell speech frames from padding).
     Existing shards are skipped unless cfg.overwrite is set, so an interrupted bake can resume.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -98,6 +99,7 @@ def _bake_subset(
                 "embeddings": grouped.to(torch.float16).cpu(),
                 "ids": [example["id"] for example in examples],
                 "texts": [example["text"] for example in examples],
+                "num_samples": torch.tensor([len(example["audio"]["array"]) for example in examples]),
             },
             shard_path,
         )
@@ -107,10 +109,15 @@ def _bake_subset(
         logger.warning("Requested %d examples, but the dataset only had %d.", max_samples, baked)
 
 
+def speech_frame_counts(num_samples: torch.Tensor) -> torch.Tensor:
+    """Number of grouped frames covering real audio; each covers 5 Whisper frames = 100 ms = 1600 samples."""
+    return ((num_samples + 1599) // 1600).clamp(max=300)
+
+
 def load_baked_embeddings(
     cfg: TrainConfig, subset: str = "train"
-) -> tuple[torch.Tensor, list[str], list[str]]:
-    """Load a subset's shards into memory: fp16 embeddings [N, 300, 3840], ids, transcripts."""
+) -> tuple[torch.Tensor, list[str], list[str], torch.Tensor]:
+    """Load a subset's shards into memory: fp16 embeddings [N, 300, 3840], ids, transcripts, audio lengths."""
     _, _, shard_dir = subset_spec(cfg, subset)
     shard_paths = sorted(shard_dir.glob("shard_*.pt"))
     if not shard_paths:
@@ -119,6 +126,9 @@ def load_baked_embeddings(
     embeddings = torch.cat([shard["embeddings"] for shard in shards])
     ids = [i for shard in shards for i in shard["ids"]]
     texts = [t for shard in shards for t in shard["texts"]]
+    if any("num_samples" not in shard for shard in shards):
+        raise ValueError(f"Shards in {shard_dir} lack audio lengths; re-bake with overwrite=True.")
+    num_samples = torch.cat([shard["num_samples"] for shard in shards])
     if len(set(ids)) != len(ids):
         raise ValueError("Baked shards contain duplicate example IDs.")
-    return embeddings, ids, texts
+    return embeddings, ids, texts, num_samples
