@@ -1,6 +1,7 @@
 #!/bin/bash
 # Short end-to-end experiment on a single consumer GPU (built for an RTX 3060, 12 GB), no Slurm needed.
-# Run from the repository root with `bash scripts/local_run.sh`. Output goes to results/local_test.
+# Run from the repository root with `bash scripts/local_run.sh`. Output goes to results/local_test, and everything the
+# run prints is also saved to a timestamped log there (local-YYYYmmdd-HHMMSS.out), like Slurm's slurm-<jobid>.out.
 # It reuses scripts/train.sh with a small configuration; everything can be overridden from the environment,
 # e.g. `STEPS=1000 BATCH_SIZE=8 bash scripts/local_run.sh`. If you hit CUDA out-of-memory, lower BATCH_SIZE.
 set -euo pipefail
@@ -24,4 +25,9 @@ export TRAIN_EVAL_SAMPLES=${TRAIN_EVAL_SAMPLES:-50}
 export WER_EXAMPLES=${WER_EXAMPLES:-20}
 export OUT=${OUT:-./results/local_test}
 
-exec bash scripts/train.sh
+mkdir -p "$OUT"
+LOG="$OUT/local-$(date +%Y%m%d-%H%M%S).out"
+echo "Logging to $LOG"
+
+# pipefail (set above) keeps train.sh's exit status through the pipe to tee
+bash scripts/train.sh 2>&1 | tee "$LOG"
