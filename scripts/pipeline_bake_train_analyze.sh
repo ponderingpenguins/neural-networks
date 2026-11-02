@@ -8,8 +8,8 @@
 # Full run on Habrok: bake once, train the projector for several seeds, analyse every checkpoint.
 # Uses all of LibriSpeech train.clean.100 (28,539 utterances). Each seed trains for at most STEPS steps and stops early
 # once the validation loss has not improved for PATIENCE evals (after MIN_STEPS); the best projector is then restored.
-# Submit from the repository root with `sbatch scripts/train.sh`; the gpu partition allows at most 3 days.
-# Every setting can be overridden from the environment, e.g. `sbatch --export=ALL,SEEDS=1,STEPS=200 scripts/train.sh`.
+# Submit from the repository root with `sbatch scripts/pipeline_bake_train_analyze.sh`; the gpu partition allows at most 3 days.
+# Every setting can be overridden from the environment, e.g. `sbatch --export=ALL,SEEDS=1,STEPS=200 scripts/pipeline_bake_train_analyze.sh`.
 # Use scripts/quick_test.sh for a one-example check first.
 set -euo pipefail
 
@@ -20,7 +20,7 @@ notify() {
     if [[ -n "${NOTIFY_URL:-}" && -n "${NOTIFY_TOKEN:-}" ]]; then
         curl -fsS --max-time 20 -H "X-Token: $NOTIFY_TOKEN" \
             --data-urlencode "subject=slam job ${SLURM_JOB_ID:-local} exited with status $status" \
-            --data-urlencode "body=Job ${SLURM_JOB_NAME:-train.sh} on $(hostname) finished after ${SECONDS}s with exit status $status. Output: slurm-${SLURM_JOB_ID:-local}.out" \
+            --data-urlencode "body=Job ${SLURM_JOB_NAME:-pipeline_bake_train_analyze.sh} on $(hostname) finished after ${SECONDS}s with exit status $status. Output: slurm-${SLURM_JOB_ID:-local}.out" \
             "$NOTIFY_URL" || true
     fi
 }

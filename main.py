@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 from bake import bake_speech_embeddings, load_baked_embeddings
 from utils import (
     TrainConfig,
-    VocabMixtureProjector,
     build_linear_projector,
     build_projector,
     build_prompt_embeddings,
@@ -62,23 +61,12 @@ def train_projector_and_transcribe(cfg: TrainConfig) -> None:
 
     # Language Model (frozen) and projector
     tokenizer, lm = load_lm(device)
-    if cfg.projector_type == "vocab":
-        vocab_ids = torch.tensor(
-            sorted({t for text in transcripts for t in tokenizer(text, add_special_tokens=False).input_ids}), device=device
-        )
-        logger.info(f"vocab projector over the {len(vocab_ids)} tokens of the training transcripts")
-        projector = VocabMixtureProjector(
-            grouped_dim, vocab_ids, lm.get_input_embeddings().weight.detach()[vocab_ids], cfg.vocab_scale
-        ).to(device)
-    elif cfg.projector_type == "mlp":
+    if cfg.projector_type == "mlp":
         projector = build_projector(grouped_dim, lm.config.hidden_size, device)
     elif cfg.projector_type == "linear":
         projector = build_linear_projector(grouped_dim, lm.config.hidden_size, device)
     else:
         raise ValueError(f"unknown projector_type {cfg.projector_type!r}")
-    with torch.no_grad():
-        for parameter in projector.parameters():
-            parameter.mul_(cfg.init_scale)
     token_embedding_layer = lm.get_input_embeddings()
 
     # Template(E_s, E_p), eq. 7, plus each transcript as its target.
@@ -332,7 +320,7 @@ def main() -> None:
     if cfg.stage == "bake":
         bake_speech_embeddings(cfg, device) # type: ignore
         # The streaming dataset leaves non-daemon threads alive that keep the process from
-        # exiting, which stalls the next stage in train.sh until Ctrl+C. Shards are already saved.
+        # exiting, which stalls the next stage in pipeline_bake_train_analyze.sh until Ctrl+C. Shards are already saved.
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(0)

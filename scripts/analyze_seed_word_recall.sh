@@ -5,7 +5,7 @@
 # Waits for the earlier queues. Outputs: results/seeds/*/analysis_norm.
 set -uo pipefail
 source .venv/bin/activate
-while pgrep -f '[t]est_eval.sh|[p]en1_long.sh|[p]en_analyze.sh' > /dev/null; do sleep 60; done
+while pgrep -f '[e]val_test_wer.sh|[e]xp_penalty1_4000steps.sh' > /dev/null; do sleep 60; done
 
 for D in results/seeds/mlp_s2 results/seeds/mlp_s3 results/seeds/mlppen_s2 results/seeds/mlppen_s3 \
          results/seeds/linear_s1 results/seeds/linear_s2 results/seeds/linear_s3; do

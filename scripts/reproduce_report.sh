@@ -4,13 +4,13 @@
 # disk for the baked embeddings (step 1). The numbers of each step are logged in DEVLOG.md (entry numbers in brackets).
 set -euo pipefail
 
-bash scripts/local_full.sh       # [1-3]  bake 12,000 train utterances, train the MLP projector for 12,000 steps
-bash scripts/short_sweep.sh      # [10-12] warmup, gradient clipping and norm penalty 0.001-10 (1,500 steps each)
-bash scripts/baseline_seeds.sh   # [13]   linear baseline and extra seeds (results/seeds)
-bash scripts/test_eval.sh        # [14]   test WER on 500 test.clean utterances for every trained model
-bash scripts/pen1_long.sh        # [14]   penalty 1, 4,000 steps
-bash scripts/overnight2.sh       # [15]   word recall on the seed runs
-bash scripts/overnight3.sh       # [15]   penalty 0.3 and a second seed of penalty 1
+bash scripts/exp_long_mlp_12000steps.sh       # [1-3]  bake 12,000 train utterances, train the MLP projector for 12,000 steps
+bash scripts/exp_penalty_clip_sweep.sh      # [10-12] warmup, gradient clipping and norm penalty 0.001-10 (1,500 steps each)
+bash scripts/exp_linear_vs_mlp_seeds.sh   # [13]   linear baseline and extra seeds (results/seeds)
+bash scripts/eval_test_wer.sh        # [14]   test WER on 500 test.clean utterances for every trained model
+bash scripts/exp_penalty1_4000steps.sh        # [14]   penalty 1, 4,000 steps
+bash scripts/analyze_seed_word_recall.sh       # [15]   word recall on the seed runs
+bash scripts/exp_penalty03_and_seed2.sh       # [15]   penalty 0.3 and a second seed of penalty 1
 
 source .venv/bin/activate
 python analysis/plot_seeds.py            # results/seeds/seeds_drop.png

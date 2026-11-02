@@ -41,9 +41,7 @@ class TrainConfig:
 
     grad_clip: float = 0.0  # clip the projector's gradient norm to this value; 0 = no clipping
     norm_penalty: float = 0.0  # weight on mean (projected frame norm - mean text embedding norm)^2; 0 = off
-    init_scale: float = 1.0  # multiplies every initial projector parameter (default PyTorch init at 1.0)
-    projector_type: str = "mlp"  # "mlp": free output; "linear": single linear layer (baseline); "vocab": softmax mixture of the LM's word embeddings (text-like by construction)
-    vocab_scale: float = 1.0  # multiplies the logits of the vocab projector's softmax
+    projector_type: str = "mlp"  # "mlp": two-layer MLP; "linear": single linear layer (baseline)
     final_wer: bool = True  # False skips the (slow) greedy-decoding WER after training; val/test loss still run
     steps: int = 300  # maximum number of training steps; patience may stop earlier
     lr: float = 1e-3  # peak learning rate
@@ -120,36 +118,6 @@ def build_projector(in_dim: int, lm_dim: int, device: torch.device) -> torch.nn.
 def build_linear_projector(in_dim: int, lm_dim: int, device: torch.device) -> torch.nn.Module:
     """Elementary baseline: a single linear map from grouped Whisper frames to the LM embedding space."""
     return torch.nn.Sequential(torch.nn.Linear(in_dim, lm_dim)).to(device)
-
-
-class VocabMixtureProjector(torch.nn.Module):
-    """The same MLP, but its output is a softmax-weighted mixture of frozen LM word embeddings.
-
-    The MLP gives a query q in the LM's embedding space, the weights are softmax(q @ E.T) over a fixed token set (the
-    tokens of the training transcripts), and the output is weights @ E. Every output lies in the convex hull of real
-    word embeddings, so it is text-like by construction; the only thing learned is which words to blend.
-    """
-
-    def __init__(self, in_dim: int, vocab_ids: torch.Tensor, vocab_embeddings: torch.Tensor, logit_scale: float = 1.0):
-        super().__init__()
-        self.logit_scale = logit_scale  # word embeddings have norm ~1, so unscaled logits give a near-uniform softmax
-        self.net = torch.nn.Sequential(
-            torch.nn.Linear(in_dim, PROJ_HIDDEN_DIM),
-            torch.nn.ReLU(),
-            torch.nn.Linear(PROJ_HIDDEN_DIM, vocab_embeddings.shape[1]),
-        )
-        self.register_buffer("vocab_ids", vocab_ids.clone())
-        self.register_buffer("vocab_embeddings", vocab_embeddings.clone())
-
-    def __getitem__(self, index):
-        return self.net[index]
-
-    def distribution(self, x: torch.Tensor) -> torch.Tensor:
-        """Weights over the token set for each frame: [..., num_tokens]."""
-        return torch.softmax(self.logit_scale * (self.net(x) @ self.vocab_embeddings.T), dim=-1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.distribution(x) @ self.vocab_embeddings
 
 
 def embed_text(tokenizer, lm, text: str, device: torch.device) -> torch.Tensor:
