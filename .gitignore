@@ -4,6 +4,9 @@
 # ingore unsaved emac files
 .#*
 
+# ignore pdf viewer
+.pdf-view-restore
+
 # ignore overleaf report
 overleaf_repo/
 
