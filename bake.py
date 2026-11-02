@@ -14,14 +14,13 @@ from utils import TrainConfig
 
 logger = logging.getLogger(__name__)
 
-frame_group_size = 5
-
+FRAME_GROUP_SIZE = 5
 
 SUBSETS = ("train", "val", "test")
 
 
 def subset_spec(cfg: TrainConfig, subset: str) -> tuple[str | None, int, Path]:
-    """Dataset split, number of samples and shard directory for a subset (train/val/test)."""
+    """Dataset split, sample count and shard directory of a subset."""
     if subset == "train":
         return cfg.dataset_split, cfg.max_samples, Path(cfg.output_path) / "speech_embeddings"
     if subset == "val":
@@ -32,9 +31,7 @@ def subset_spec(cfg: TrainConfig, subset: str) -> tuple[str | None, int, Path]:
 
 
 def bake_speech_embeddings(cfg: TrainConfig, device: torch.device) -> None:
-    """Bake the train, val and test subsets that have a non-zero sample count."""
-    if cfg.bake_batch_size < 1:
-        raise ValueError("bake_batch_size must be at least 1.")
+    """Encode every subset with a non-zero sample count and save the shards."""
     processor = WhisperProcessor.from_pretrained("openai/whisper-small")
     whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
     encoder = whisper_model.model.encoder.to(device).eval()
@@ -45,8 +42,8 @@ def bake_speech_embeddings(cfg: TrainConfig, device: torch.device) -> None:
             _bake_subset(cfg, processor, encoder, device, split, sample_count, out_dir)
 
 
-def _decode_audio(audio: dict) -> np.ndarray:
-    """Decode raw FLAC/WAV bytes with soundfile, so no FFmpeg/torchcodec is needed (LibriSpeech is already 16 kHz)."""
+def decode_audio(audio: dict) -> np.ndarray:
+    """Decode FLAC/WAV bytes with soundfile, so FFmpeg and torchcodec are not needed."""
     array, sampling_rate = soundfile.read(io.BytesIO(audio["bytes"]), dtype="float32")
     if sampling_rate != 16000:
         raise ValueError(f"Expected 16 kHz audio, got {sampling_rate} Hz")
@@ -62,19 +59,18 @@ def _bake_subset(
     max_samples: int,
     out_dir: Path,
 ) -> None:
-    """Encode max_samples recordings with Whisper and save grouped embeddings to disk.
+    """Encode `max_samples` recordings with Whisper and save the grouped embeddings, one shard per batch.
 
-    Each shard holds one encoder batch: fp16 embeddings [n, 300, 3840], ids, transcripts and the
-    unpadded audio length in 16 kHz samples (to tell speech frames from padding).
-    Existing shards are skipped unless cfg.overwrite is set, so an interrupted bake can resume.
+    A shard holds fp16 embeddings [n, 300, 3840], ids, transcripts and the unpadded audio length in samples,
+    which tells speech frames from padding. Existing shards are skipped unless cfg.overwrite is set, so an
+    interrupted bake can resume.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    speech_dataset = load_dataset(cfg.dataset_name, split=split, streaming=True)
-    speech_dataset = speech_dataset.cast_column("audio", Audio(decode=False))
-    speech_dataset = speech_dataset.take(max_samples)
+    dataset = load_dataset(cfg.dataset_name, split=split, streaming=True)
+    dataset = dataset.cast_column("audio", Audio(decode=False)).take(max_samples)
 
-    iterator = iter(speech_dataset)
+    iterator = iter(dataset)
     baked = 0
     shard_index = 0
     while baked < max_samples:
@@ -82,7 +78,7 @@ def _bake_subset(
         if not examples:
             break
         for example in examples:
-            example["audio"]["array"] = _decode_audio(example["audio"])
+            example["audio"]["array"] = decode_audio(example["audio"])
         shard_path = out_dir / f"shard_{shard_index:05d}.pt"
         shard_index += 1
         baked += len(examples)
@@ -102,10 +98,10 @@ def _bake_subset(
         with torch.no_grad():
             speech_embeddings = encoder(audio_features).last_hidden_state  # [batch, 1500, 768]
 
-        batch_size, frame_count, encoder_dim = speech_embeddings.shape
-        grouped_frame_count = frame_count // frame_group_size
-        grouped = speech_embeddings[:, : grouped_frame_count * frame_group_size].reshape(
-            batch_size, grouped_frame_count, frame_group_size * encoder_dim
+        n, n_frames, dim = speech_embeddings.shape
+        n_groups = n_frames // FRAME_GROUP_SIZE
+        grouped = speech_embeddings[:, : n_groups * FRAME_GROUP_SIZE].reshape(
+            n, n_groups, FRAME_GROUP_SIZE * dim
         )  # [batch, 300, 3840]
 
         torch.save(
@@ -124,15 +120,15 @@ def _bake_subset(
 
 
 def speech_frame_counts(num_samples: torch.Tensor) -> torch.Tensor:
-    """Number of grouped frames covering real audio; each covers 5 Whisper frames = 100 ms = 1600 samples."""
+    """Grouped frames that cover real audio, at 1600 samples (100 ms, 5 Whisper frames) each."""
     return ((num_samples + 1599) // 1600).clamp(max=300)
 
 
 class ShardedEmbeddings:
-    """Memory-mapped view over the embedding shards, indexed like one [N, 300, 3840] fp16 tensor.
+    """Memory-mapped shards indexed like one [N, 300, 3840] fp16 tensor.
 
-    The full train set does not fit in RAM, so rows are read from disk on demand and the OS page cache
-    keeps whatever fits. Supports an int, a slice or a list of row indices.
+    The train set does not fit in RAM, so rows are read from disk on demand. Takes an int, a slice or a
+    list of indices.
     """
 
     def __init__(self, tensors: list[torch.Tensor]):
@@ -163,9 +159,9 @@ class ShardedEmbeddings:
 def load_baked_embeddings(
     cfg: TrainConfig, subset: str = "train", lazy: bool = False
 ) -> tuple[torch.Tensor | ShardedEmbeddings, list[str], list[str], torch.Tensor]:
-    """Load a subset's shards: fp16 embeddings [N, 300, 3840], ids, transcripts, audio lengths.
+    """Load a subset's shards: fp16 embeddings [N, 300, 3840], ids, transcripts and audio lengths.
 
-    With lazy=True the embeddings stay memory-mapped on disk (see ShardedEmbeddings) instead of being read into RAM.
+    With lazy=True the embeddings stay memory-mapped (see ShardedEmbeddings) instead of being read into RAM.
     """
     _, _, shard_dir = subset_spec(cfg, subset)
     shard_paths = sorted(shard_dir.glob("shard_*.pt"))

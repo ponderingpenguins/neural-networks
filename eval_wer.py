@@ -13,7 +13,7 @@ import torch
 from bake import load_baked_embeddings
 from utils import (
     TrainConfig,
-    _edit_distance,
+    edit_distance,
     build_linear_projector,
     build_projector,
     build_prompt_embeddings,
@@ -55,7 +55,7 @@ for spec in models:
     errors, words = [], []
     for reference, hypothesis in zip(texts, hypotheses):
         ref_words = normalize_text(reference).split()
-        errors.append(_edit_distance(ref_words, normalize_text(hypothesis).split()))
+        errors.append(edit_distance(ref_words, normalize_text(hypothesis).split()))
         words.append(len(ref_words))
     wer = sum(errors) / sum(words)
     results[name] = {"wer": wer, "errors": errors, "words": words, "hypotheses": hypotheses}

@@ -12,8 +12,8 @@ import torch
 from datasets import Audio, load_dataset
 from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-from bake import _decode_audio
-from utils import _edit_distance, normalize_text
+from bake import decode_audio
+from utils import edit_distance, normalize_text
 
 args = dict(a.split("=", 1) for a in sys.argv[1:])
 count, out_path = int(args["n"]), Path(args["out"])
@@ -30,13 +30,13 @@ while len(errors) < count:
     examples = list(islice(iterator, 8))
     if not examples:
         break
-    audio = [_decode_audio(example["audio"]) for example in examples]
+    audio = [decode_audio(example["audio"]) for example in examples]
     features = processor.feature_extractor(audio, sampling_rate=16000, return_tensors="pt").input_features.to(device)
     with torch.no_grad():
         generated = model.generate(features, language="en", task="transcribe", max_new_tokens=200, do_sample=False)
     for example, hypothesis in zip(examples, processor.batch_decode(generated, skip_special_tokens=True)):
         ref_words = normalize_text(example["text"]).split()
-        errors.append(_edit_distance(ref_words, normalize_text(hypothesis).split()))
+        errors.append(edit_distance(ref_words, normalize_text(hypothesis).split()))
         words.append(len(ref_words))
         hypotheses.append(hypothesis)
 wer = sum(errors) / sum(words)
