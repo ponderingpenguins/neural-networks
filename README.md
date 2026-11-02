@@ -73,5 +73,6 @@ The prefix says what a script does: `pipeline_` is the reusable bake/train/analy
 | `exp_penalty03_and_seed2.sh` | Penalty 0.3 (seed 1) and penalty 1 (seed 2), then alignment analysis on both |
 | `eval_test_wer.sh` | Test WER on 500 `test.clean` utterances for Whisper-small, untrained projectors and every trained model |
 | `eval_replacement_wer.sh` | Nearest-token replacement WER on 100 validation utterances |
+| `eval_replacement_wer_test.sh` | The same replacement WER on the first 100 `test.clean` utterances, for the long run and three short runs |
 | `analyze_seed_word_recall.sh` | Word recall and frame norms on the seed runs |
 | `reproduce_report.sh` | Runs the experiments above in their original order |
