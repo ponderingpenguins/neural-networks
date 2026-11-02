@@ -1,7 +1,7 @@
 #!/bin/bash
-# Every experiment behind the report, in the order it was run (about 1.5 days on one RTX 3070 8 GB). Each step is its
-# own script and can be run alone; this file only fixes the order. Run from the repository root. Needs ~60 GB of free
-# disk for the baked embeddings (step 1). The numbers of each step are logged in DEVLOG.md (entry numbers in brackets).
+# Every experiment behind the report, in the order it was run (about 1.5 days on one RTX 3070 8 GB). Each step is
+# its own script; this file only fixes the order. Needs ~60 GB of free disk for the baked embeddings. The bracketed
+# numbers are DEVLOG.md entries.
 set -euo pipefail
 
 bash scripts/exp_long_mlp_12000steps.sh       # [1-3]  bake 12,000 train utterances, train the MLP projector for 12,000 steps

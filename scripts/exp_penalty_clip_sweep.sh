@@ -1,9 +1,8 @@
 #!/bin/bash
-# A few very short training runs on the already baked embeddings, to get a feeling for warmup, gradient clipping and
-# the output-norm penalty. Run from the repository root with `bash scripts/exp_penalty_clip_sweep.sh`; each run writes to
-# results/short_sweep/<name> (train_log.csv, wer_history.json) and is compared with analysis/plot_runs.py at the end.
-# Override from the environment, e.g. `STEPS=800 bash scripts/exp_penalty_clip_sweep.sh`. Needs the baked shards in BAKED
-# (made by scripts/exp_long_mlp_12000steps.sh) and no GPU memory used by anything else.
+# Short runs on the baked embeddings to compare warmup, gradient clipping and the norm penalty. Each run writes
+# train_log.csv and wer_history.json to results/short_sweep/<name>; analysis/plot_runs.py compares them at the end.
+# Overrides come from the environment, e.g. STEPS=800. Needs the baked shards (BAKED, made by
+# exp_long_mlp_12000steps.sh) and a free GPU.
 set -euo pipefail
 
 BAKED=${BAKED:-results/local_full/baked}

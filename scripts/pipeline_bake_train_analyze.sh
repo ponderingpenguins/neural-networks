@@ -5,12 +5,11 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=48:00:00
-# Full run on Habrok: bake once, train the projector for several seeds, analyse every checkpoint.
-# Uses all of LibriSpeech train.clean.100 (28,539 utterances). Each seed trains for at most STEPS steps and stops early
-# once the validation loss has not improved for PATIENCE evals (after MIN_STEPS); the best projector is then restored.
-# Submit from the repository root with `sbatch scripts/pipeline_bake_train_analyze.sh`; the gpu partition allows at most 3 days.
-# Every setting can be overridden from the environment, e.g. `sbatch --export=ALL,SEEDS=1,STEPS=200 scripts/pipeline_bake_train_analyze.sh`.
-# Use scripts/quick_test.sh for a one-example check first.
+# Bake LibriSpeech train.clean.100 once (28,539 utterances), train the projector for several seeds, analyse every
+# checkpoint. Each seed stops early once the validation loss has not improved for PATIENCE evals (after MIN_STEPS)
+# and the best projector is restored. Submit from the repository root with
+# `sbatch scripts/pipeline_bake_train_analyze.sh` (the gpu partition allows 3 days). Settings come from the
+# environment, e.g. `sbatch --export=ALL,SEEDS=1,STEPS=200 scripts/pipeline_bake_train_analyze.sh`.
 set -euo pipefail
 
 # Optional: ping an endpoint on a VPS when the job ends (success, failure or timeout kill); the VPS sends the email

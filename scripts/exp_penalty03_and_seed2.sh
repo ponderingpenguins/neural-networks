@@ -1,8 +1,7 @@
 #!/bin/bash
-# Extra runs, last in the overnight chain (after scripts/analyze_seed_word_recall.sh):
-#  - penalty 0.3 (seed 1): a point between 0.1 (drops, partial text-likeness) and 1 (no drop in 1,500 steps);
-#  - penalty 1 (seed 2): a second seed for the "no drop" outcome.
-# Both at the short-sweep settings (clip 1.0, lr 1e-4, 1,500 steps), then the alignment analysis on each.
+# Penalty 0.3 (seed 1), between 0.1 (drops) and 1 (no drop in 1,500 steps), and penalty 1 with seed 2.
+# Both at the sweep settings (clip 1.0, lr 1e-4, 1,500 steps), then the alignment analysis on each.
+# Waits for the other overnight scripts.
 set -uo pipefail
 source .venv/bin/activate
 while pgrep -f '[e]val_test_wer.sh|[e]xp_penalty1_4000steps.sh|[a]nalyze_seed_word_recall.sh' > /dev/null; do sleep 60; done

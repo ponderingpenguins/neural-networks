@@ -1,7 +1,6 @@
 #!/bin/bash
-# Test WER on the first 500 test.clean utterances: Whisper-small as a normal ASR system (reference), an untrained
-# projector, and every trained projector (linear baseline, MLP, MLP + penalties, the long 12,000-step run).
-# Waits for the GPU to be free. Run from the repository root. Results: results/test_eval/*.json
+# Test WER on the first 500 test.clean utterances for Whisper-small (reference), untrained projectors and every
+# trained projector. Waits for the GPU to be free. Output: results/test_eval/*.json
 set -euo pipefail
 source .venv/bin/activate
 while pgrep -f '[m]ain.py|[a]nalyze.py' > /dev/null; do sleep 30; done

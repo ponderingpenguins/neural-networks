@@ -1,8 +1,6 @@
 #!/bin/bash
-# Overnight batch after the test-WER queue and the long penalty-1 run: alignment analysis (word recall, frame norm)
-# on the seed runs, for error bars on the central question. (The vocabulary-mixture projector runs that used to follow
-# were dropped from the report; see DEVLOG.md entry 11 and 15.)
-# Waits for the earlier queues. Outputs: results/seeds/*/analysis_norm.
+# Alignment analysis (word recall, frame norm) on the seed runs, for error bars on the central question.
+# Waits for eval_test_wer.sh and exp_penalty1_4000steps.sh. Output: results/seeds/*/analysis_norm.
 set -uo pipefail
 source .venv/bin/activate
 while pgrep -f '[e]val_test_wer.sh|[e]xp_penalty1_4000steps.sh' > /dev/null; do sleep 60; done

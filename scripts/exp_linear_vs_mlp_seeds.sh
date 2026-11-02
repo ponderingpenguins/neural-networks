@@ -1,7 +1,6 @@
 #!/bin/bash
-# Linear-projector baseline (single Linear layer) against the MLP, plus extra seeds for the MLP with and without the
-# small norm penalty, all at the settings of scripts/exp_penalty_clip_sweep.sh. Run from the repository root; each run writes to
-# results/seeds/<name>_s<seed>. Needs no other GPU use.
+# Linear baseline against the MLP over 3 seeds, plus the MLP with norm penalty 0.1, at the settings of
+# exp_penalty_clip_sweep.sh. Each run writes to results/seeds/<name>_s<seed>. Needs the whole GPU.
 set -euo pipefail
 source .venv/bin/activate
 

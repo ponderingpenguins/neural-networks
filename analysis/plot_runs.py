@@ -1,9 +1,8 @@
-"""Compare short training runs: train vs validation loss per run, plus gradients and projected-frame norms.
+"""Compare short training runs: train vs validation loss, gradient norms, frame norms and learning rate.
 
-Reads train_log.csv (per step) and wer_history.json (validation loss every eval) from each run directory.
+Reads train_log.csv and wer_history.json from each run directory; legends use the directory names.
 
-Usage: python analysis/plot_runs.py out=results/short_sweep/compare.png results/short_sweep/a results/short_sweep/b ...
-Run names on the legends are the directory names.
+python analysis/plot_runs.py out=results/short_sweep/compare.png results/short_sweep/a results/short_sweep/b
 """
 import json
 import sys
@@ -17,7 +16,7 @@ import numpy as np
 
 
 def smooth(values: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
-    """Moving mean; returns (x offsets, smoothed values) so the curve lines up with the steps."""
+    """Moving mean, with the x offsets that line it up with the steps."""
     window = min(window, len(values))
     return np.arange(window - 1, len(values)), np.convolve(values, np.ones(window) / window, mode="valid")
 
@@ -43,7 +42,7 @@ def main() -> None:
     for ax in axes.flat:
         ax.axis("off")
 
-    # Row 1: train vs validation loss, one panel per run.
+    # train vs validation loss, one panel per run
     for column, (name, log, history) in enumerate(loaded):
         ax = axes[0, column]
         ax.axis("on")
@@ -60,7 +59,7 @@ def main() -> None:
         ax.grid(alpha=0.3)
         ax.legend(fontsize=7)
 
-    # Row 2: gradient norm vs step (total, and per linear layer), all runs on shared axes.
+    # gradient norms, total and per layer, all runs on shared axes
     ax_total, ax_l1, ax_l2 = axes[1, 0], axes[1, 1], axes[1, 2]
     for ax, key, title in (
         (ax_total, "grad_norm", "gradient norm, whole projector (before clipping)"),
@@ -78,7 +77,7 @@ def main() -> None:
         ax.grid(alpha=0.3, which="both")
         ax.legend(fontsize=7)
 
-    # Row 3: training loss of all runs together, projected-frame norm, and the learning-rate schedule.
+    # training loss, frame norm and learning rate across runs
     ax_loss, ax_norm, ax_lr = axes[2, 0], axes[2, 1], axes[2, 2]
     for ax in (ax_loss, ax_norm, ax_lr):
         ax.axis("on")

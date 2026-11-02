@@ -1,9 +1,7 @@
 #!/bin/bash
-# Long single-seed run on the RTX 3070 (8 GB, ~60 GB of free disk), no Slurm needed: a larger slice of train.clean.100
-# than local_run.sh, with early stopping. Run from the repository root with `bash scripts/exp_long_mlp_12000steps.sh`; everything the
-# run prints is also saved to results/local_full/local-YYYYmmdd-HHMMSS.out. It resumes where it left off if the bake is
-# interrupted (existing shards are skipped). Everything can be overridden from the environment.
-# 12000 samples take ~28 GB of baked shards (~2.3 MB each); all 28539 would need ~65 GB.
+# Long single-seed run on a local GPU (RTX 3070, 8 GB), no Slurm: bake 12,000 train utterances (~28 GB of shards;
+# all 28,539 would need ~65 GB) and train with early stopping. Output is also saved to results/local_full/local-<time>.out.
+# Resumes after an interrupted bake (existing shards are skipped). Settings can be overridden from the environment.
 set -euo pipefail
 
 if ! command -v nvidia-smi >/dev/null || ! nvidia-smi -L >/dev/null 2>&1; then

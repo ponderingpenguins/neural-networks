@@ -1,6 +1,6 @@
 #!/bin/bash
-# Nearest-token replacement WER on 100 validation utterances (entry 10 used 30). Same analysis as analyze.py,
-# kept apart from the earlier results in analysis_wer100/. Run from the repository root.
+# Nearest-token replacement WER on 100 validation utterances, the same analysis as analyze.py. Output goes to
+# analysis_wer100/ so the earlier 30-utterance results are kept. Run from the repository root.
 set -euo pipefail
 source .venv/bin/activate
 
