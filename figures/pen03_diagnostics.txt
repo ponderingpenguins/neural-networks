@@ -1,0 +1,1 @@
+Training diagnostics of one run: MLP projector with norm penalty 0.3, seed 1 (1,500 steps). Same panels as pen1_s2_diagnostics: loss (plateau near 3.6, drop at about step 1,420, validation loss 1.57 at step 1,500), gradient norms before clipping, mean norm of the projected frames (about 1, rising slightly during the drop) and learning rate.
