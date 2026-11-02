@@ -27,6 +27,7 @@ references = []
 for shard in sorted((test_dir / "speech_embeddings_test").glob("shard_*.pt")):
     references += torch.load(shard, mmap=True)["texts"]
 results = json.loads((test_dir / "wer_results.json").read_text())
+results["whisper_small"] = json.loads((test_dir / "whisper_wer.json").read_text())  # Whisper's own decoder
 hypotheses = results[model]["hypotheses"]
 assert len(references) == len(hypotheses)
 
