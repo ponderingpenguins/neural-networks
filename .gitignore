@@ -1,5 +1,12 @@
+# ---- Haukur specifics ----
+
+
 # ingore unsaved emac files
 .#*
+
+# ignore overleaf report
+overleaf_repo/
+# ----
 
 
 # Byte-compiled / optimized / DLL files
