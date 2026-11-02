@@ -1,0 +1,10 @@
+group                                  WER  per-seed / bootstrap 95% CI
+Whisper-small (own decoder)          0.045  [0.045]  CI [0.040, 0.051]
+untrained MLP projector              1.688  [1.688]  CI [1.551, 1.837]
+untrained linear projector           1.170  [1.170]  CI [1.093, 1.257]
+linear projector                     0.203 +- 0.008 (seed std)  [0.206, 0.208, 0.194]  CI [0.166, 0.246]
+MLP                                  0.188 +- 0.004 (seed std)  [0.187, 0.192, 0.183]  CI [0.164, 0.215]
+MLP + penalty 0.1                    0.296 +- 0.079 (seed std)  [0.386, 0.241, 0.260]  CI [0.249, 0.345]
+MLP + penalty 1 (1,500 steps)        2.076  [2.076]  CI [1.898, 2.257]
+MLP + penalty 10 (1,500 steps)       1.179  [1.179]  CI [1.132, 1.230]
+MLP, 12,000 steps                    0.123  [0.123]  CI [0.104, 0.148]
