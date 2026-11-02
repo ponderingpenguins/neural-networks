@@ -34,12 +34,11 @@ Without a penalty the projected frames have norm 39-46 against about 0.93 for th
 main.py                 bake / train / evaluate entry point (stage=bake|train)
 utils.py, bake.py       model, projectors, training config, Whisper baking
 analyze.py              projector vs. text-embedding analysis (nearest tokens, norms, word recall)
-vocab_eval.py           vocabulary-mixture projector evaluation
 eval_wer.py             test WER of trained projectors
 whisper_wer.py          test WER of Whisper-small alone
 wer_summary.py          group means, seed std and bootstrap intervals
 error_analysis.py       substitutions / insertions / deletions, WER by length
-analysis/               exploratory analyses and plots (audio-swap gap, attention, weight anatomy, run comparison)
+analysis/               run-comparison and seed plots
 scripts/                one shell script per experiment; scripts/reproduce_report.sh gives the order
 docs/                   results written in the course vocabulary
 figures/, results_summary/   report figures and result tables (results/ itself is not tracked)

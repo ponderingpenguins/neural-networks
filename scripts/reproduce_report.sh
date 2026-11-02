@@ -5,13 +5,11 @@
 set -euo pipefail
 
 bash scripts/local_full.sh       # [1-3]  bake 12,000 train utterances, train the MLP projector for 12,000 steps
-bash scripts/dense_run.sh        # [5-6]  checkpoints every 25 steps + audio-swap gap, attention, frame statistics
-bash scripts/law_runs.sh         # [7-9]  seed / lr / batch size / init scale vs the step of the loss drop
 bash scripts/short_sweep.sh      # [10-12] warmup, gradient clipping and norm penalty 0.001-10 (1,500 steps each)
 bash scripts/baseline_seeds.sh   # [13]   linear baseline and extra seeds (results/seeds)
 bash scripts/test_eval.sh        # [14]   test WER on 500 test.clean utterances for every trained model
 bash scripts/pen1_long.sh        # [14]   penalty 1, 4,000 steps
-bash scripts/overnight2.sh       # [15]   word recall on the seed runs, vocabulary-mixture projector with logit scale
+bash scripts/overnight2.sh       # [15]   word recall on the seed runs
 bash scripts/overnight3.sh       # [15]   penalty 0.3 and a second seed of penalty 1
 
 source .venv/bin/activate
