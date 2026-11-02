@@ -1,11 +1,9 @@
-"""Analyse what the trained projector maps speech frames to in the LLM's embedding space.
+"""What does the trained projector turn speech frames into, in the LM's embedding space?
 
-For each projector checkpoint (plus an untrained control) this measures
-  * nearest-neighbour retrieval of the spoken words among the LM's token embeddings,
-  * cosine / norm statistics versus text-text baselines and a speech-vs-text linear probe,
-  * the WER when projected frames are replaced by their nearest token embedding.
+Per checkpoint (plus an untrained control): nearest-token retrieval of the spoken words, cosine and norm
+statistics against text-text baselines, and the WER when frames are replaced by their nearest token.
 
-Usage: python analyze.py output_path=./results subset=val
+python analyze.py output_path=./results subset=val
 """
 import json
 import logging
@@ -45,18 +43,16 @@ device = (
 
 @dataclass
 class AnalyzeConfig:
-    """Configuration for the analysis."""
-
-    output_path: Path = Path("./results")  # holds the baked shards, checkpoints and the analysis/ output
+    output_path: Path = Path("./results")  # baked shards, checkpoints, and the output folder
     subset: str = "val"  # train, val or test
     checkpoints: list[str] | None = None  # "init" and/or state_dict paths; None = init + all saved + final
     max_examples: int = 0  # 0 = every baked example
-    wer_examples: int = 100  # examples used for the replacement-WER test
+    wer_examples: int = 100  # examples for the replacement WER
     skip_wer: bool = False
     batch_size: int = 4  # the [B, 300, vocab] similarity matrix must fit in memory
     max_new_tokens: int = 200
-    viz_examples: int = 3  # utterances shown frame by frame (nearest token per 100 ms frame); 0 = none
-    out_name: str = "analysis"  # folder under output_path for the results; change it to keep an earlier analysis
+    viz_examples: int = 3  # utterances plotted frame by frame; 0 = none
+    out_name: str = "analysis"  # output folder under output_path
     seed: int = 67
 
 
@@ -65,16 +61,16 @@ REPLACEMENT_MODES = ("nn", "nn_rescaled", "random")
 
 
 def word_token_variants(tokenizer, word: str) -> list[tuple[int, ...]]:
-    """Token sequences that spell a word: cased and lower/capitalised, with and without a leading space."""
+    """Token sequences that spell a word: three casings, with and without a leading space."""
     forms = {word, word.lower(), word.capitalize()}
     forms |= {" " + form for form in forms}
     return [tuple(tokenizer(form, add_special_tokens=False).input_ids) for form in forms]
 
 
 def word_recall(tokenizer, texts: list[str], neighbour_sets: list[set[int]]) -> tuple[float, float]:
-    """Fraction of transcript words that have a variant fully contained in the utterance's neighbour set.
+    """Share of transcript words with a spelling variant fully inside the utterance's neighbour set.
 
-    Also returns the fraction of words that have a single-token variant (the words this metric is most exact for).
+    Also returns the share of words that have a single-token variant, where the metric is most exact.
     """
     hits = words = single = 0
     for text, neighbours in zip(texts, neighbour_sets):
@@ -87,7 +83,7 @@ def word_recall(tokenizer, texts: list[str], neighbour_sets: list[set[int]]) -> 
 
 
 def separability_probe(speech: torch.Tensor, text: torch.Tensor, generator: torch.Generator) -> float:
-    """Held-out accuracy of a logistic-regression probe separating speech frames from token embeddings."""
+    """Held-out accuracy of a logistic probe that tells speech frames from token embeddings."""
     count = min(len(speech), len(text), 5000)
     speech = speech[torch.randperm(len(speech), generator=generator)[:count]]
     text = text[torch.randperm(len(text), generator=generator)[:count]]
@@ -111,19 +107,19 @@ def separability_probe(speech: torch.Tensor, text: torch.Tensor, generator: torc
 
 
 def load_projector(spec: str, in_dim: int, lm_dim: int, seed: int) -> torch.nn.Module:
-    """'init' gives a freshly initialised (untrained) projector; anything else is a state_dict path."""
+    """'init' is an untrained projector; anything else is a state_dict path."""
     if spec == "init":
         torch.manual_seed(seed)
         return build_projector(in_dim, lm_dim, device).eval()
     state = torch.load(spec, map_location=device)
-    builder = build_linear_projector if "2.weight" not in state else build_projector  # the linear baseline has no hidden layer
+    builder = build_linear_projector if "2.weight" not in state else build_projector  # the linear baseline has no second layer
     projector = builder(in_dim, lm_dim, device)
     projector.load_state_dict(state)
     return projector.eval()
 
 
 def checkpoint_label(spec: str) -> tuple[str, float]:
-    """Display label and x-axis position (training step) of a checkpoint spec."""
+    """Label and training step of a checkpoint (init is step 0; no step in the name means the final one)."""
     if spec == "init":
         return "init", 0
     match = re.search(r"step(\d+)", spec)
@@ -132,66 +128,61 @@ def checkpoint_label(spec: str) -> tuple[str, float]:
     return "final", float("inf")
 
 
-def analyse_checkpoint(spec, args, ctx) -> tuple[dict, dict]:
-    """Compute every metric for one projector. Returns (metrics, arrays for plotting)."""
-    tokenizer, lm = ctx["tokenizer"], ctx["lm"]
-    text_embeddings = ctx["text_embeddings"]  # [V, D]
-    text_normalised = F.normalize(text_embeddings, dim=-1)
-    embeddings, texts, frame_counts = ctx["embeddings"], ctx["texts"], ctx["frame_counts"]
-    prefix, suffix = ctx["prefix"], ctx["suffix"]
-    projector = load_projector(spec, embeddings.shape[-1], text_embeddings.shape[-1], args.seed)
-    generator = torch.Generator().manual_seed(args.seed)
-    wer_count = 0 if args.skip_wer else min(args.wer_examples, len(texts))
+class FrameStats:
+    """Frame-level numbers collected while one projector runs over the examples."""
 
-    sets_per_k: dict[int, list[set[int]]] = {k: [] for k in HIT_KS}
-    speech_cos, silence_cos, speech_norm, top1_counter = [], [], [], Counter()
-    speech_frames = []
-    frame_views = []
-    hypotheses = {mode: [] for mode in ("none", *REPLACEMENT_MODES)}
-    for start in range(0, len(texts), args.batch_size):
-        batch = embeddings[start : start + args.batch_size].to(device=device, dtype=torch.float32)
-        counts = frame_counts[start : start + args.batch_size]
-        speech_mask = torch.arange(batch.shape[1])[None, :] < counts[:, None]  # [B, 300]
-        speech_mask = speech_mask.to(device)
-        with torch.no_grad():
-            projected = projector(batch)  # [B, 300, D]
-            similarities = F.normalize(projected, dim=-1) @ text_normalised.T  # [B, 300, V]
-            top_values, top_ids = similarities.topk(max(HIT_KS), dim=-1)
-        for position in range(len(batch)):
-            frames = top_ids[position, : int(counts[position])]
+    def __init__(self):
+        self.neighbour_sets: dict[int, list[set[int]]] = {k: [] for k in HIT_KS}
+        self.speech_cos, self.silence_cos, self.speech_norm, self.speech_frames = [], [], [], []
+        self.top1_counts = Counter()
+        self.views = []
+
+    def add(self, projected, top_values, top_ids, counts, speech_mask, texts, n_views):
+        """Add a batch; its first `n_views` utterances also get a frame view."""
+        for i in range(len(projected)):
+            n = int(counts[i])
+            frames = top_ids[i, :n]
             for k in HIT_KS:
-                sets_per_k[k].append(set(frames[:, :k].flatten().tolist()))
-            if start + position < args.viz_examples:
-                frame_views.append({
-                    "text": texts[start + position],
+                self.neighbour_sets[k].append(set(frames[:, :k].flatten().tolist()))
+            if i < n_views:
+                self.views.append({
+                    "text": texts[i],
                     "ids": frames[:, :3].cpu(),
-                    "cos": top_values[position, : int(counts[position]), :3].cpu(),
-                    "vectors": projected[position, : int(counts[position])].cpu(),
+                    "cos": top_values[i, :n, :3].cpu(),
+                    "vectors": projected[i, :n].cpu(),
                 })
-        speech_cos.append(top_values[..., 0][speech_mask])
-        silence_cos.append(top_values[..., 0][~speech_mask])
-        speech_norm.append(projected.norm(dim=-1)[speech_mask])
-        top1_counter.update(top_ids[..., 0][speech_mask].tolist())
-        speech_frames.append(projected[speech_mask])
+        self.speech_cos.append(top_values[..., 0][speech_mask])
+        self.silence_cos.append(top_values[..., 0][~speech_mask])
+        self.speech_norm.append(projected.norm(dim=-1)[speech_mask])
+        self.top1_counts.update(top_ids[..., 0][speech_mask].tolist())
+        self.speech_frames.append(projected[speech_mask])
 
-        if start < wer_count:
-            top1 = text_embeddings[top_ids[..., 0]]
-            replacements = {
-                "none": projected,
-                "nn": top1,
-                "nn_rescaled": F.normalize(top1, dim=-1) * projected.norm(dim=-1, keepdim=True),
-                "random": text_embeddings[
-                    torch.randint(len(text_embeddings), top1.shape[:2], generator=generator).to(device)
-                ],
-            }
-            for mode, replacement in replacements.items():
-                # Only speech frames are replaced; padding frames keep the projector's output.
-                speech = torch.where(speech_mask[..., None], replacement, projected)
-                hypotheses[mode] += transcribe(tokenizer, lm, prefix, suffix, speech, args.max_new_tokens)
 
-    speech_cos, silence_cos = torch.cat(speech_cos), torch.cat(silence_cos)
-    speech_norm, speech_frames = torch.cat(speech_norm), torch.cat(speech_frames)
-    top1_total = sum(top1_counter.values())
+def replacement_hypotheses(projected, top_ids, speech_mask, ctx, generator, max_new_tokens) -> dict[str, list[str]]:
+    """Transcripts when speech frames are swapped for token embeddings. Padding frames are left alone."""
+    text_embeddings = ctx["text_embeddings"]
+    top1 = text_embeddings[top_ids[..., 0]]
+    replacements = {
+        "none": projected,
+        "nn": top1,
+        "nn_rescaled": F.normalize(top1, dim=-1) * projected.norm(dim=-1, keepdim=True),
+        "random": text_embeddings[torch.randint(len(text_embeddings), top1.shape[:2], generator=generator).to(device)],
+    }
+    return {
+        mode: transcribe(
+            ctx["tokenizer"], ctx["lm"], ctx["prefix"], ctx["suffix"],
+            torch.where(speech_mask[..., None], replacement, projected), max_new_tokens,
+        )
+        for mode, replacement in replacements.items()
+    }
+
+
+def summarize(stats: FrameStats, ctx: dict, generator: torch.Generator) -> tuple[dict, dict]:
+    """Metrics row and plot arrays from the collected frames."""
+    tokenizer, text_embeddings = ctx["tokenizer"], ctx["text_embeddings"]
+    speech_cos, silence_cos = torch.cat(stats.speech_cos), torch.cat(stats.silence_cos)
+    speech_norm, speech_frames = torch.cat(stats.speech_norm), torch.cat(stats.speech_frames)
+    hubs = stats.top1_counts.most_common(10)
 
     metrics: dict = {
         "top1_cos_speech": speech_cos.mean().item(),
@@ -199,34 +190,64 @@ def analyse_checkpoint(spec, args, ctx) -> tuple[dict, dict]:
         "text_text_top1_cos": ctx["text_text_cos"],
         "norm_speech": speech_norm.mean().item(),
         "norm_text": ctx["text_norm"],
-        "distinct_top1_tokens": len(top1_counter),
-        "top1_hub_share": sum(count for _, count in top1_counter.most_common(10)) / max(top1_total, 1),
-        "top1_hub_tokens": [tokenizer.decode([token]) for token, _ in top1_counter.most_common(10)],
+        "distinct_top1_tokens": len(stats.top1_counts),
+        "top1_hub_share": sum(count for _, count in hubs) / max(sum(stats.top1_counts.values()), 1),
+        "top1_hub_tokens": [tokenizer.decode([token]) for token, _ in hubs],
         "probe_accuracy": separability_probe(speech_frames, text_embeddings[: len(tokenizer)], generator),
     }
-    metrics.update(hit_metrics(tokenizer, texts, sets_per_k))
+    metrics.update(hit_metrics(tokenizer, ctx["texts"], stats.neighbour_sets))
     metrics["speech_var_in_text_pcs"] = subspace_fraction(speech_frames.cpu(), ctx["text_mean"], ctx["text_pcs"])
     metrics["text_var_in_text_pcs"] = ctx["text_pc_fraction"]
-    for view in frame_views:
+    for view in stats.views:
         view["word_cos"], view["order_corr"] = word_alignment(view, tokenizer, text_embeddings)
-    if frame_views:
-        metrics["word_order_corr"] = sum(view["order_corr"] for view in frame_views) / len(frame_views)
-    if wer_count:
-        references = texts[:wer_count]
-        for mode, hyps in hypotheses.items():
-            metrics[f"wer_{mode}"] = word_error_rate(references, hyps)
-    return metrics, {
+    if stats.views:
+        metrics["word_order_corr"] = sum(view["order_corr"] for view in stats.views) / len(stats.views)
+    arrays = {
         "speech_cos": speech_cos.cpu(),
         "speech_frames": speech_frames[:3000].cpu(),
-        "frame_views": frame_views,
+        "frame_views": stats.views,
     }
+    return metrics, arrays
+
+
+def analyse_checkpoint(spec, args, ctx) -> tuple[dict, dict]:
+    """Metrics and plot arrays for one projector."""
+    text_embeddings = ctx["text_embeddings"]  # [V, D]
+    text_normalised = F.normalize(text_embeddings, dim=-1)
+    embeddings, texts, frame_counts = ctx["embeddings"], ctx["texts"], ctx["frame_counts"]
+    projector = load_projector(spec, embeddings.shape[-1], text_embeddings.shape[-1], args.seed)
+    generator = torch.Generator().manual_seed(args.seed)
+    wer_count = 0 if args.skip_wer else min(args.wer_examples, len(texts))
+
+    stats = FrameStats()
+    hypotheses = {mode: [] for mode in ("none", *REPLACEMENT_MODES)}
+    for start in range(0, len(texts), args.batch_size):
+        end = start + args.batch_size
+        batch = embeddings[start:end].to(device=device, dtype=torch.float32)
+        counts = frame_counts[start:end]
+        speech_mask = (torch.arange(batch.shape[1])[None, :] < counts[:, None]).to(device)  # [B, 300]
+        with torch.no_grad():
+            projected = projector(batch)  # [B, 300, D]
+            similarities = F.normalize(projected, dim=-1) @ text_normalised.T  # [B, 300, V]
+            top_values, top_ids = similarities.topk(max(HIT_KS), dim=-1)
+        stats.add(projected, top_values, top_ids, counts, speech_mask, texts[start:end], args.viz_examples - start)
+        if start < wer_count:
+            new = replacement_hypotheses(projected, top_ids, speech_mask, ctx, generator, args.max_new_tokens)
+            for mode, hyps in new.items():
+                hypotheses[mode] += hyps
+
+    metrics, arrays = summarize(stats, ctx, generator)
+    if wer_count:
+        for mode, hyps in hypotheses.items():
+            metrics[f"wer_{mode}"] = word_error_rate(texts[:wer_count], hyps)
+    return metrics, arrays
 
 
 def hit_metrics(tokenizer, texts: list[str], sets_per_k: dict[int, list[set[int]]]) -> dict:
-    """Bag-of-words recall of transcript words among each utterance's frame neighbours, per k.
+    """Word recall among each utterance's frame neighbours, per k.
 
-    The control scores each utterance's words against a *different* utterance's neighbours, so any
-    recall above it comes from the audio rather than from frequent words being everyone's neighbour.
+    The control scores the words against another utterance's neighbours, so anything above it comes from
+    the audio and not from frequent tokens that are everyone's neighbour.
     """
     out: dict = {}
     for k, sets in sets_per_k.items():
@@ -240,15 +261,15 @@ def hit_metrics(tokenizer, texts: list[str], sets_per_k: dict[int, list[set[int]
 
 
 def token_text(tokenizer, token_id: int) -> str:
-    """Decoded token with newlines and non-ASCII characters escaped, so plots do not need CJK glyphs."""
+    """Decoded token with newlines and non-ASCII escaped, so plots need no CJK glyphs."""
     return tokenizer.decode([token_id]).encode("unicode_escape").decode("ascii")
 
 
 def write_frame_views(label: str, views: list[dict], tokenizer, out_dir: Path) -> None:
-    """Show, per 100 ms frame, which token embedding the projected frame is closest to.
+    """Nearest token of every 100 ms frame.
 
-    Writes frames_<label>.txt (top-3 tokens per frame) and frames_<label>.png (top-1 cosine over time,
-    runs of 2+ frames with the same nearest token are labelled; green = the token is a spoken word of 2+ letters).
+    Writes frames_<label>.txt (top 3 per frame) and frames_<label>.png (top-1 cosine over time; runs of 2+ equal
+    tokens are labelled, green when the token is a spoken word).
     """
     import warnings
 
@@ -293,17 +314,17 @@ def write_frame_views(label: str, views: list[dict], tokenizer, out_dir: Path) -
 
 
 def subspace_fraction(x: torch.Tensor, mean: torch.Tensor, pcs: torch.Tensor) -> float:
-    """Average share of a vector's (mean-centred) squared norm that lies in the span of the given components."""
+    """Mean share of the centred squared norm that falls inside the span of `pcs`."""
     centred = x.float() - mean
     return ((centred @ pcs).pow(2).sum(-1) / centred.pow(2).sum(-1)).mean().item()
 
 
 def word_alignment(view: dict, tokenizer, text_embeddings: torch.Tensor) -> tuple[torch.Tensor, float]:
-    """Cosine of every frame to every spoken word's embedding, and how well the best frames follow word order.
+    """Cosine of every frame to every spoken word, and how well the best frames follow word order.
 
-    A word's embedding is the mean of its token embeddings (leading-space, lower-case form). The order
-    correlation is the Pearson correlation between a word's position in the transcript and the time of the
-    frame most similar to it (after removing each word's mean over frames); about 1 means monotonic alignment.
+    A word's vector is the mean embedding of its tokens (leading space, lower case). Order correlation is the
+    Pearson correlation between a word's position and the time of its best-matching frame, after removing each
+    word's mean over frames; about 1 means the frames follow the words in order.
     """
     words = normalize_text(view["text"]).lower().split()
     word_vectors = torch.stack([
@@ -316,7 +337,7 @@ def word_alignment(view: dict, tokenizer, text_embeddings: torch.Tensor) -> tupl
 
 
 def write_word_heatmaps(label: str, views: list[dict], out_dir: Path) -> None:
-    """Frame x word cosine heatmaps: a diagonal band means frames resemble the words in the order spoken."""
+    """Frame x word cosine heatmaps; a diagonal band means the frames follow the words in order."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -343,23 +364,26 @@ def write_word_heatmaps(label: str, views: list[dict], out_dir: Path) -> None:
 def write_paper_views(
     arrays: dict, tokenizer, text_embeddings: torch.Tensor, text_sample: torch.Tensor, out_dir: Path
 ) -> None:
-    """The two views of Kumar et al. (2024, arXiv 2411.03866, Figs. 4 and 5), for every checkpoint side by side.
+    """Figs. 4 and 5 of Kumar et al. (2024, arXiv 2411.03866) for every checkpoint side by side."""
+    labels = list(arrays)
+    utterances = min(len(arrays[label]["frame_views"]) for label in labels)
+    if utterances == 0:
+        return
+    panels = write_token_cosine(arrays, labels, utterances, tokenizer, text_embeddings, out_dir)
+    write_centred_cosine(panels, labels, utterances, out_dir)
+    write_cosine_histograms(arrays, panels, labels, utterances, text_sample, out_dir)
 
-    paper_fig4_token_cosine.png: cosine of every transcript token's embedding to every projected frame, on the
-    paper's fixed -1..1 viridis scale (rows: utterances, columns: checkpoints). A diagonal means the frames
-    follow the transcript tokens in order.
-    nearest_tokens.txt: each utterance's reference text, then the nearest vocabulary token of every frame in
-    time order (no collapsing of repeats), one line per checkpoint, as in the paper's Fig. 5.
+
+def write_token_cosine(arrays, labels, utterances, tokenizer, text_embeddings, out_dir):
+    """Cosine of every transcript token to every frame; rows are utterances, columns checkpoints.
+
+    Also writes nearest_tokens.txt and returns the cosine matrices.
     """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    labels = list(arrays)
-    utterances = min(len(arrays[label]["frame_views"]) for label in labels)
-    if utterances == 0:
-        return
     fig, axes = plt.subplots(utterances, len(labels), figsize=(3.4 * len(labels) + 1, 3.4 * utterances), squeeze=False)
     panels: dict[tuple[int, int], torch.Tensor] = {}
     lines = []
@@ -390,10 +414,18 @@ def write_paper_views(
     fig.savefig(out_dir / "paper_fig4_token_cosine.png", dpi=120, bbox_inches="tight")
     plt.close(fig)
     (out_dir / "nearest_tokens.txt").write_text("\n".join(lines), encoding="utf-8")
+    return panels
 
-    # The raw cosines all sit within about +-0.1, so the fixed -1..1 scale hides them. Same panels with each
-    # token's mean over frames removed (it is a stripe that does not depend on time) on a symmetric-log scale,
-    # shared by all panels so checkpoints stay comparable.
+
+def write_centred_cosine(panels, labels, utterances, out_dir) -> None:
+    """The same panels with each token's mean over frames removed, on one symlog scale.
+
+    The raw cosines sit within about 0.1, which the fixed -1..1 scale hides.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     from matplotlib.colors import SymLogNorm
 
     centred = {key: cos - cos.mean(1, keepdim=True) for key, cos in panels.items()}
@@ -414,9 +446,16 @@ def write_paper_views(
     fig.savefig(out_dir / "paper_fig4_token_cosine_rescaled.png", dpi=120, bbox_inches="tight")
     plt.close(fig)
 
-    # Histograms of the same cosines. Two references: random vocabulary tokens against the same frames (if the
-    # transcript tokens score no higher, the frames carry no token identity), and the spread of unrelated
-    # random directions, a Gaussian with standard deviation 1/sqrt(dimension).
+
+def write_cosine_histograms(arrays, panels, labels, utterances, text_sample, out_dir) -> None:
+    """Histograms of those cosines next to two references: random vocabulary tokens against the same frames,
+    and random directions (a Gaussian with sd 1/sqrt(dim)).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     random_tokens = F.normalize(text_sample.float(), dim=-1)
     fig, axes = plt.subplots(1, len(labels), figsize=(3.4 * len(labels), 3.4), squeeze=False, sharex=True, sharey=True)
     bins = torch.linspace(-0.4, 0.4, 81)
@@ -448,7 +487,7 @@ def write_paper_views(
 
 
 def write_geometry(label: str, data: dict, ctx: dict, out_dir: Path) -> None:
-    """Three views of the embedding space: PCA fitted on token embeddings only, directions only, and a time trajectory."""
+    """Three PCA views: fitted on token embeddings, unit-norm directions, and the first utterance over time."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -457,14 +496,14 @@ def write_geometry(label: str, data: dict, ctx: dict, out_dir: Path) -> None:
     speech, text = data["speech_frames"].float(), ctx["text_sample"]
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
-    # (a) PCA fitted on token embeddings alone: how far does speech sit outside the text subspace?
+    # fitted on token embeddings only: how far does speech sit outside the text subspace?
     components = ctx["text_pcs"][:, :2]
     for points, name in ((text, "token embeddings"), (speech, "projected speech")):
         axes[0].scatter(*((points - ctx["text_mean"]) @ components).T.numpy(), s=3, alpha=0.4, label=name)
     axes[0].set_title("PCA fitted on token embeddings")
     axes[0].legend()
 
-    # (b) + (c) unit-normalised vectors, joint PCA: removes the norm gap and shows direction overlap
+    # unit-norm vectors, joint PCA: removes the norm gap
     both = F.normalize(torch.cat([text, speech]), dim=-1)
     both = both - both.mean(0)
     _, _, directions = torch.pca_lowrank(both, q=2, center=False)
@@ -495,9 +534,9 @@ def plot_results(rows: list[dict], arrays: dict, out_dir: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    steps ={row["label"]: i for i, row in enumerate(rows)}
+    steps = {row["label"]: i for i, row in enumerate(rows)}
 
-    # Word recall vs training step, with the other-utterance control and the untrained projector.
+    # word recall per checkpoint; dashed is the other-utterance control
     fig, ax = plt.subplots(figsize=(6, 4))
     xs = [steps[row["label"]] for row in rows]
     for k in HIT_KS:
@@ -511,7 +550,6 @@ def plot_results(rows: list[dict], arrays: dict, out_dir: Path) -> None:
     fig.savefig(out_dir / "word_recall.png", dpi=150)
     plt.close(fig)
 
-    # Top-1 cosine similarity distributions.
     fig, ax = plt.subplots(figsize=(6, 4))
     for label, data in arrays.items():
         ax.hist(data["speech_cos"].numpy(), bins=60, alpha=0.5, label=label, density=True)
@@ -523,10 +561,10 @@ def plot_results(rows: list[dict], arrays: dict, out_dir: Path) -> None:
     plt.close(fig)
 
 
-def main() -> None:
+def parse_args() -> AnalyzeConfig:
     cfg = OmegaConf.merge(OmegaConf.structured(AnalyzeConfig), OmegaConf.from_cli())
     try:
-        args = AnalyzeConfig(**OmegaConf.to_container(cfg, resolve=True))  # type: ignore
+        args = AnalyzeConfig(**OmegaConf.to_container(cfg, resolve=True))
     except TypeError as e:
         logger.error(f"Error: {e}\n\nUsage: python analyze.py output_path='./results' subset=val")
         sys.exit(1)
@@ -534,14 +572,21 @@ def main() -> None:
         logger.error(f"Unknown subset '{args.subset}'; expected train, val or test.")
         sys.exit(1)
     args.output_path = Path(args.output_path)
+    return args
 
-    checkpoints = args.checkpoints
-    if checkpoints is None:
-        saved = sorted((args.output_path / "checkpoints").glob("projector_step*.pt"),
-                       key=lambda path: int(re.search(r"step(\d+)", path.name).group(1)))
-        final = args.output_path / "projector.pt"
-        checkpoints = ["init", *map(str, saved), *([str(final)] if final.exists() else [])]
 
+def find_checkpoints(args: AnalyzeConfig) -> list[str]:
+    """The given checkpoints, or init plus every saved step and the final projector."""
+    if args.checkpoints is not None:
+        return args.checkpoints
+    saved = sorted((args.output_path / "checkpoints").glob("projector_step*.pt"),
+                   key=lambda path: int(re.search(r"step(\d+)", path.name).group(1)))
+    final = args.output_path / "projector.pt"
+    return ["init", *map(str, saved), *([str(final)] if final.exists() else [])]
+
+
+def build_context(args: AnalyzeConfig) -> dict:
+    """Shared inputs: baked speech, the LM and token-embedding baselines."""
     cfg = TrainConfig(dataset_name="", max_samples=0, output_path=args.output_path)
     embeddings, _, texts, num_samples = load_baked_embeddings(cfg, args.subset)
     if args.max_examples:
@@ -553,16 +598,16 @@ def main() -> None:
     text_embeddings = lm.get_input_embeddings().weight.detach()  # [V, D]
     prefix, suffix = build_prompt_embeddings(tokenizer, lm, device)
 
-    # Text-text baseline: how close is a token's nearest *other* token? (sampled; the full V x V is too big)
+    # nearest other token of each token, on a sample (the full V x V matrix is too big)
     generator = torch.Generator().manual_seed(args.seed)
     sample = text_embeddings[torch.randperm(len(tokenizer), generator=generator)[:2000].to(device)]
     similarities = F.normalize(sample, dim=-1) @ F.normalize(text_embeddings, dim=-1).T
-    similarities[similarities > 0.9999] = -1  # drop each token's similarity to itself
+    similarities[similarities > 0.9999] = -1  # drop each token's match with itself
     text_cpu = text_embeddings[: len(tokenizer)].float().cpu()
     text_mean = text_cpu.mean(0)
     _, _, text_pcs = torch.pca_lowrank(text_cpu - text_mean, q=50, center=False)
     text_sample = text_cpu[torch.randperm(len(text_cpu), generator=generator)[:3000]]
-    ctx = {
+    return {
         "text_mean": text_mean, "text_pcs": text_pcs, "text_sample": text_sample,
         "text_pc_fraction": subspace_fraction(text_sample, text_mean, text_pcs),
         "tokenizer": tokenizer, "lm": lm, "text_embeddings": text_embeddings, "prefix": prefix, "suffix": suffix,
@@ -571,8 +616,14 @@ def main() -> None:
         "text_norm": text_embeddings.norm(dim=-1).mean().item(),
     }
 
+
+def main() -> None:
+    args = parse_args()
+    checkpoints = find_checkpoints(args)
+    ctx = build_context(args)
     out_dir = args.output_path / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
+
     rows, arrays = [], {}
     for spec in checkpoints:
         label, step = checkpoint_label(spec)
@@ -581,13 +632,13 @@ def main() -> None:
         rows.append({"label": label, "step": step if step != float("inf") else None, "checkpoint": spec, **metrics})
         arrays[label] = plot_data
         if plot_data["frame_views"]:
-            write_frame_views(label, plot_data["frame_views"], tokenizer, out_dir)
+            write_frame_views(label, plot_data["frame_views"], ctx["tokenizer"], out_dir)
             write_word_heatmaps(label, plot_data["frame_views"], out_dir)
         write_geometry(label, plot_data, ctx, out_dir)
         logger.info(" ".join(f"{k}={v:.3f}" for k, v in metrics.items() if isinstance(v, float)))
         (out_dir / f"analysis_{args.subset}.json").write_text(json.dumps(rows, indent=2))
     plot_results(rows, arrays, out_dir)
-    write_paper_views(arrays, tokenizer, text_embeddings, ctx["text_sample"], out_dir)
+    write_paper_views(arrays, ctx["tokenizer"], ctx["text_embeddings"], ctx["text_sample"], out_dir)
     logger.info(f"wrote results and figures to {out_dir}")
 
 
