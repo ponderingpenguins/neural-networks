@@ -1,3 +1,4 @@
+import bisect
 import io
 import logging
 from itertools import islice
@@ -127,16 +128,54 @@ def speech_frame_counts(num_samples: torch.Tensor) -> torch.Tensor:
     return ((num_samples + 1599) // 1600).clamp(max=300)
 
 
+class ShardedEmbeddings:
+    """Memory-mapped view over the embedding shards, indexed like one [N, 300, 3840] fp16 tensor.
+
+    The full train set does not fit in RAM, so rows are read from disk on demand and the OS page cache
+    keeps whatever fits. Supports an int, a slice or a list of row indices.
+    """
+
+    def __init__(self, tensors: list[torch.Tensor]):
+        self.tensors = tensors
+        self.starts = [0]
+        for tensor in tensors:
+            self.starts.append(self.starts[-1] + len(tensor))
+        self.shape = (self.starts[-1], *tensors[0].shape[1:])
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def _row(self, index: int) -> torch.Tensor:
+        if not -len(self) <= index < len(self):
+            raise IndexError(index)
+        index %= len(self)
+        shard = bisect.bisect_right(self.starts, index) - 1
+        return self.tensors[shard][index - self.starts[shard]]
+
+    def __getitem__(self, key) -> torch.Tensor:
+        if isinstance(key, int):
+            return self._row(key)
+        if isinstance(key, slice):
+            key = range(*key.indices(len(self)))
+        return torch.stack([self._row(int(index)) for index in key])
+
+
 def load_baked_embeddings(
-    cfg: TrainConfig, subset: str = "train"
-) -> tuple[torch.Tensor, list[str], list[str], torch.Tensor]:
-    """Load a subset's shards into memory: fp16 embeddings [N, 300, 3840], ids, transcripts, audio lengths."""
+    cfg: TrainConfig, subset: str = "train", lazy: bool = False
+) -> tuple[torch.Tensor | ShardedEmbeddings, list[str], list[str], torch.Tensor]:
+    """Load a subset's shards: fp16 embeddings [N, 300, 3840], ids, transcripts, audio lengths.
+
+    With lazy=True the embeddings stay memory-mapped on disk (see ShardedEmbeddings) instead of being read into RAM.
+    """
     _, _, shard_dir = subset_spec(cfg, subset)
     shard_paths = sorted(shard_dir.glob("shard_*.pt"))
     if not shard_paths:
         raise FileNotFoundError(f"No baked embeddings in {shard_dir}; run with stage=bake first.")
-    shards = [torch.load(path) for path in shard_paths]
-    embeddings = torch.cat([shard["embeddings"] for shard in shards])
+    shards = [torch.load(path, mmap=lazy) for path in shard_paths]
+    if lazy:
+        embeddings = ShardedEmbeddings([shard["embeddings"] for shard in shards])
+    else:
+        embeddings = torch.cat([shard["embeddings"] for shard in shards])
     ids = [i for shard in shards for i in shard["ids"]]
     texts = [t for shard in shards for t in shard["texts"]]
     if any("num_samples" not in shard for shard in shards):

@@ -22,6 +22,7 @@ from omegaconf import OmegaConf
 from bake import load_baked_embeddings, speech_frame_counts
 from utils import (
     TrainConfig,
+    build_linear_projector,
     build_projector,
     build_prompt_embeddings,
     load_lm,
@@ -55,6 +56,7 @@ class AnalyzeConfig:
     batch_size: int = 4  # the [B, 300, vocab] similarity matrix must fit in memory
     max_new_tokens: int = 200
     viz_examples: int = 3  # utterances shown frame by frame (nearest token per 100 ms frame); 0 = none
+    out_name: str = "analysis"  # folder under output_path for the results; change it to keep an earlier analysis
     seed: int = 67
 
 
@@ -113,8 +115,10 @@ def load_projector(spec: str, in_dim: int, lm_dim: int, seed: int) -> torch.nn.M
     if spec == "init":
         torch.manual_seed(seed)
         return build_projector(in_dim, lm_dim, device).eval()
-    projector = build_projector(in_dim, lm_dim, device)
-    projector.load_state_dict(torch.load(spec, map_location=device))
+    state = torch.load(spec, map_location=device)
+    builder = build_linear_projector if "2.weight" not in state else build_projector  # the linear baseline has no hidden layer
+    projector = builder(in_dim, lm_dim, device)
+    projector.load_state_dict(state)
     return projector.eval()
 
 
@@ -336,6 +340,113 @@ def write_word_heatmaps(label: str, views: list[dict], out_dir: Path) -> None:
     plt.close(fig)
 
 
+def write_paper_views(
+    arrays: dict, tokenizer, text_embeddings: torch.Tensor, text_sample: torch.Tensor, out_dir: Path
+) -> None:
+    """The two views of Kumar et al. (2024, arXiv 2411.03866, Figs. 4 and 5), for every checkpoint side by side.
+
+    paper_fig4_token_cosine.png: cosine of every transcript token's embedding to every projected frame, on the
+    paper's fixed -1..1 viridis scale (rows: utterances, columns: checkpoints). A diagonal means the frames
+    follow the transcript tokens in order.
+    nearest_tokens.txt: each utterance's reference text, then the nearest vocabulary token of every frame in
+    time order (no collapsing of repeats), one line per checkpoint, as in the paper's Fig. 5.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    labels = list(arrays)
+    utterances = min(len(arrays[label]["frame_views"]) for label in labels)
+    if utterances == 0:
+        return
+    fig, axes = plt.subplots(utterances, len(labels), figsize=(3.4 * len(labels) + 1, 3.4 * utterances), squeeze=False)
+    panels: dict[tuple[int, int], torch.Tensor] = {}
+    lines = []
+    for row in range(utterances):
+        lines += [f"reference: {arrays[labels[0]]['frame_views'][row]['text']}"]
+        for column, label in enumerate(labels):
+            view = arrays[label]["frame_views"][row]
+            token_ids = tokenizer(view["text"], add_special_tokens=False).input_ids
+            tokens = F.normalize(text_embeddings[token_ids].float().cpu(), dim=-1)
+            cos = tokens @ F.normalize(view["vectors"].float(), dim=-1).T  # [transcript tokens, frames]
+            panels[row, column] = cos
+            ax = axes[row, column]
+            image = ax.imshow(cos.numpy(), aspect="auto", cmap="viridis", vmin=-1, vmax=1,
+                              extent=(0, cos.shape[1] * 0.1, len(token_ids) - 0.5, -0.5))
+            if column == 0:
+                ax.set_yticks(range(len(token_ids)), [token_text(tokenizer, i) for i in token_ids], fontsize=5)
+            else:
+                ax.set_yticks([])
+            if row == 0:
+                ax.set_title(label, fontsize=9)
+            if row == utterances - 1:
+                ax.set_xlabel("time (s)")
+            nearest = " ".join(tokenizer.decode([i]).replace("\n", "\\n") for i in view["ids"][:, 0].tolist())
+            lines.append(f"  {label:>10}: {nearest}")
+        lines.append("")
+    fig.colorbar(image, ax=axes, fraction=0.015, label="cosine")
+    fig.suptitle("transcript token vs. projected frame cosine (Kumar et al. Fig. 4 style)", fontsize=10)
+    fig.savefig(out_dir / "paper_fig4_token_cosine.png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    (out_dir / "nearest_tokens.txt").write_text("\n".join(lines), encoding="utf-8")
+
+    # The raw cosines all sit within about +-0.1, so the fixed -1..1 scale hides them. Same panels with each
+    # token's mean over frames removed (it is a stripe that does not depend on time) on a symmetric-log scale,
+    # shared by all panels so checkpoints stay comparable.
+    from matplotlib.colors import SymLogNorm
+
+    centred = {key: cos - cos.mean(1, keepdim=True) for key, cos in panels.items()}
+    limit = torch.cat([value.abs().flatten() for value in centred.values()]).quantile(0.995).item()
+    norm = SymLogNorm(linthresh=limit / 10, vmin=-limit, vmax=limit)
+    fig, axes = plt.subplots(utterances, len(labels), figsize=(3.4 * len(labels) + 1, 3.4 * utterances), squeeze=False)
+    for (row, column), data in centred.items():
+        ax = axes[row, column]
+        image = ax.imshow(data.numpy(), aspect="auto", cmap="RdBu_r", norm=norm,
+                          extent=(0, data.shape[1] * 0.1, data.shape[0] - 0.5, -0.5))
+        ax.set_yticks([])
+        if row == 0:
+            ax.set_title(labels[column], fontsize=9)
+        if row == utterances - 1:
+            ax.set_xlabel("time (s)")
+    fig.colorbar(image, ax=axes, fraction=0.015, label="cosine minus token mean (symlog)")
+    fig.suptitle("transcript token vs. projected frame cosine, token mean removed, symmetric log scale", fontsize=10)
+    fig.savefig(out_dir / "paper_fig4_token_cosine_rescaled.png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+    # Histograms of the same cosines. Two references: random vocabulary tokens against the same frames (if the
+    # transcript tokens score no higher, the frames carry no token identity), and the spread of unrelated
+    # random directions, a Gaussian with standard deviation 1/sqrt(dimension).
+    random_tokens = F.normalize(text_sample.float(), dim=-1)
+    fig, axes = plt.subplots(1, len(labels), figsize=(3.4 * len(labels), 3.4), squeeze=False, sharex=True, sharey=True)
+    bins = torch.linspace(-0.4, 0.4, 81)
+    for column, label in enumerate(labels):
+        ax = axes[0, column]
+        views = arrays[label]["frame_views"][:utterances]
+        transcript = torch.cat([panels[row, column].flatten() for row in range(utterances)])
+        frames = F.normalize(torch.cat([view["vectors"].float() for view in views]), dim=-1)
+        control = (frames @ random_tokens.T).flatten()
+        control = control[torch.randperm(len(control))[: len(transcript) * 20]]
+        sigma = 1 / frames.shape[-1] ** 0.5
+        centres = (bins[:-1] + bins[1:]) / 2
+        density = torch.exp(-0.5 * (centres / sigma) ** 2) / (sigma * (2 * torch.pi) ** 0.5)
+        ax.hist(control.numpy(), bins=bins.numpy(), density=True, histtype="step", color="gray",
+                label=f"random tokens (mean {control.mean():+.3f}, sd {control.std():.3f})")
+        ax.hist(transcript.numpy(), bins=bins.numpy(), density=True, histtype="step", color="tab:red",
+                label=f"transcript tokens (mean {transcript.mean():+.3f}, sd {transcript.std():.3f})")
+        ax.plot(centres.numpy(), density.numpy(), "k:", lw=1, label=f"unrelated directions (sd {sigma:.3f})")
+        ax.set_yscale("log")
+        ax.set_ylim(1e-2, None)
+        ax.set_title(label, fontsize=9)
+        ax.set_xlabel("cosine")
+        ax.legend(fontsize=5, loc="lower center")
+    axes[0, 0].set_ylabel("density")
+    fig.suptitle("frame-to-token cosine histograms", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out_dir / "cosine_histograms.png", dpi=130)
+    plt.close(fig)
+
+
 def write_geometry(label: str, data: dict, ctx: dict, out_dir: Path) -> None:
     """Three views of the embedding space: PCA fitted on token embeddings only, directions only, and a time trajectory."""
     import matplotlib
@@ -460,7 +571,7 @@ def main() -> None:
         "text_norm": text_embeddings.norm(dim=-1).mean().item(),
     }
 
-    out_dir = args.output_path / "analysis"
+    out_dir = args.output_path / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
     rows, arrays = [], {}
     for spec in checkpoints:
@@ -476,6 +587,7 @@ def main() -> None:
         logger.info(" ".join(f"{k}={v:.3f}" for k, v in metrics.items() if isinstance(v, float)))
         (out_dir / f"analysis_{args.subset}.json").write_text(json.dumps(rows, indent=2))
     plot_results(rows, arrays, out_dir)
+    write_paper_views(arrays, tokenizer, text_embeddings, ctx["text_sample"], out_dir)
     logger.info(f"wrote results and figures to {out_dir}")
 
 
